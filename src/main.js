@@ -1,12 +1,7 @@
 /**
- * Segugio.it Scraper v1.5.0
+ * Segugio.it Scraper v1.6.0 — diagnostic build
  *
- * Uses Playwright directly (no Crawlee crawler wrapper) to bypass
- * Crawlee's _throwOnBlockedRequest which intercepts 403 before the
- * browser can even load the page.
- *
- * Segugio.it returns 403 on the initial HTTP request but the browser
- * (with proper headers/cookies) loads fine via JS navigation.
+ * Heavy logging to diagnose page structure and fix selectors.
  */
 
 import { Actor, log } from 'apify';
@@ -16,14 +11,12 @@ import { chromium } from 'playwright';
 const BASE = 'https://tariffe.segugio.it';
 
 const CATEGORY_URLS = {
-    luce:       { label: 'Electricity',       urls: [`${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`] },
-    gas:        { label: 'Gas',               urls: [`${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`] },
-    'luce-gas': { label: 'Electricity + Gas', urls: [`${BASE}/migliori-tariffe/migliori-tariffe-luce-gas.aspx`] },
-    internet:   { label: 'Internet/Fiber',    urls: [`${BASE}/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx`] },
-    mobile:     { label: 'Mobile',            urls: [`${BASE}/tariffe-cellulari/`] },
+    luce:       { urls: [`${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`] },
+    gas:        { urls: [`${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`] },
+    'luce-gas': { urls: [`${BASE}/migliori-tariffe/migliori-tariffe-luce-gas.aspx`] },
+    internet:   { urls: [`${BASE}/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx`] },
+    mobile:     { urls: [`${BASE}/tariffe-cellulari/`] },
 };
-
-// ─── helpers ─────────────────────────────────────────────────────────────────
 
 function parseEur(raw) {
     if (!raw) return null;
@@ -75,33 +68,115 @@ function parseCardLines(lines) {
 }
 
 async function scrapePage(page, url, categoria, includeSponsored) {
-    log.info(`[${categoria}] Navigating: ${url}`);
+    log.info(`━━━ [${categoria}] NAVIGATING: ${url}`);
 
-    // Navigate ignoring HTTP errors — Playwright continues even on 403
-    const response = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-    });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const status   = response?.status();
+    log.info(`━━━ [${categoria}] HTTP STATUS: ${status}`);
 
-    const status = response?.status();
-    log.info(`[${categoria}] HTTP ${status}`);
+    // ── DIAGNOSTIC 1: page title and basic info
+    const title  = await page.title();
+    const bodyLen = await page.evaluate(() => document.body?.innerHTML?.length ?? 0);
+    log.info(`━━━ [${categoria}] PAGE TITLE: "${title}" | BODY HTML LENGTH: ${bodyLen}`);
 
-    // Wait for React to render offer cards
-    try {
-        await page.waitForSelector('img[title^="Logo di "]', { timeout: 20000 });
-        log.info(`[${categoria}] Offers rendered`);
-    } catch {
-        // Try scrolling to trigger lazy loading
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await page.waitForTimeout(3000);
-        const count = await page.locator('img[title^="Logo di "]').count();
-        if (count === 0) {
-            log.warning(`[${categoria}] No offers found after scroll on ${url}`);
-            return [];
-        }
+    // ── DIAGNOSTIC 2: wait strategy — try multiple selectors
+    const selectors = [
+        'img[title^="Logo di "]',
+        'img[alt^="logo "]',
+        'img[alt^="Logo "]',
+        '[class*="card"]',
+        '[class*="offer"]',
+        '[class*="offerta"]',
+        '[class*="tariffa"]',
+        '[class*="provider"]',
+        '[class*="fornitore"]',
+        'article',
+    ];
+
+    log.info(`━━━ [${categoria}] CHECKING SELECTORS...`);
+    for (const sel of selectors) {
+        const count = await page.locator(sel).count();
+        if (count > 0) log.info(`  ✅ "${sel}" → ${count} elements`);
+        else           log.info(`  ❌ "${sel}" → 0`);
     }
 
-    // Extract from DOM
+    // ── DIAGNOSTIC 3: wait for content or timeout
+    let rendered = false;
+    try {
+        await page.waitForSelector('img[title^="Logo di "]', { timeout: 15000 });
+        rendered = true;
+        log.info(`━━━ [${categoria}] ✅ img[title^="Logo di "] appeared`);
+    } catch {
+        log.warning(`━━━ [${categoria}] ⚠️  img[title^="Logo di "] did NOT appear — trying scroll + wait`);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight / 2));
+        await page.waitForTimeout(3000);
+        const countAfter = await page.locator('img[title^="Logo di "]').count();
+        log.info(`━━━ [${categoria}] After scroll: img[title^="Logo di "] count = ${countAfter}`);
+        if (countAfter > 0) rendered = true;
+    }
+
+    // ── DIAGNOSTIC 4: dump ALL img elements (first 20)
+    const allImgs = await page.evaluate(() =>
+        [...document.querySelectorAll('img')].slice(0, 20).map(img => ({
+            src:   img.getAttribute('src')   || '',
+            alt:   img.getAttribute('alt')   || '',
+            title: img.getAttribute('title') || '',
+        }))
+    );
+    log.info(`━━━ [${categoria}] ALL IMGS (first 20):`);
+    allImgs.forEach((img, i) => log.info(`  [${i}] alt="${img.alt}" title="${img.title}" src="${img.src.slice(0,80)}"`));
+
+    // ── DIAGNOSTIC 5: dump first 3000 chars of body text
+    const bodyText = await page.evaluate(() =>
+        document.body?.innerText?.slice(0, 3000) ?? ''
+    );
+    log.info(`━━━ [${categoria}] BODY TEXT (first 3000):\n${bodyText}`);
+
+    // ── DIAGNOSTIC 6: check for React / Next.js / SPA signals
+    const spaSignals = await page.evaluate(() => {
+        const signals = {};
+        signals.hasNextData      = !!document.getElementById('__NEXT_DATA__');
+        signals.hasReactRoot     = !!document.getElementById('root') || !!document.getElementById('app') || !!document.getElementById('__nuxt');
+        signals.scriptCount      = document.querySelectorAll('script[src]').length;
+        signals.hasWindow_data   = typeof window.__data !== 'undefined';
+        const scripts = [...document.querySelectorAll('script[src]')].map(s => s.src).filter(s => /chunk|main|app|vendor/i.test(s));
+        signals.bundleScripts    = scripts.slice(0, 5);
+        return signals;
+    });
+    log.info(`━━━ [${categoria}] SPA SIGNALS: ${JSON.stringify(spaSignals)}`);
+
+    // ── DIAGNOSTIC 7: look for offer data in script tags (JSON-LD or window.__data__)
+    const scriptData = await page.evaluate(() => {
+        const results = [];
+        document.querySelectorAll('script').forEach(s => {
+            const content = s.textContent || '';
+            if (content.length > 100 && (
+                content.includes('offerta') || content.includes('fornitore') ||
+                content.includes('prezzo') || content.includes('Edison') ||
+                content.includes('Enel') || content.includes('kWh')
+            )) {
+                results.push({
+                    type: s.getAttribute('type') || 'text/javascript',
+                    preview: content.slice(0, 400),
+                });
+            }
+        });
+        return results.slice(0, 3);
+    });
+
+    if (scriptData.length > 0) {
+        log.info(`━━━ [${categoria}] OFFER DATA IN SCRIPTS (${scriptData.length} found):`);
+        scriptData.forEach((s, i) => log.info(`  [${i}] type="${s.type}" preview: ${s.preview}`));
+    } else {
+        log.info(`━━━ [${categoria}] No offer data found in script tags`);
+    }
+
+    if (!rendered) {
+        log.warning(`━━━ [${categoria}] Could not find offer elements — returning 0 offers`);
+        return [];
+    }
+
+    // ── EXTRACTION (same as before)
     const rawOffers = await page.evaluate(() => {
         const offers = [], seen = new Set();
         document.querySelectorAll('img[title^="Logo di "]').forEach(logoEl => {
@@ -127,6 +202,14 @@ async function scrapePage(page, url, categoria, includeSponsored) {
         });
         return offers;
     });
+
+    log.info(`━━━ [${categoria}] RAW OFFERS FOUND: ${rawOffers.length}`);
+    if (rawOffers.length > 0) {
+        const first = rawOffers[0];
+        log.info(`━━━ [${categoria}] FIRST OFFER RAW:`);
+        log.info(`  fornitore: "${first.fornitore}"`);
+        log.info(`  lines (${first.lines.length}): ${JSON.stringify(first.lines.slice(0, 20))}`);
+    }
 
     const offers = [];
     for (const raw of rawOffers) {
@@ -154,14 +237,13 @@ await Actor.init();
 
 const input = (await Actor.getInput()) ?? {};
 const {
-    categories       = ['luce', 'gas', 'internet', 'mobile'],
+    categories       = ['luce'],
     includeSponsored = true,
     maxItems         = 0,
     proxyConfig: proxyConfigInput,
 } = input;
 
-// Build proxy URL if needed
-let proxyUrl = undefined;
+let proxyUrl;
 if (proxyConfigInput?.useApifyProxy !== false) {
     const proxyConfiguration = await Actor.createProxyConfiguration(
         proxyConfigInput ?? { useApifyProxy: true }
@@ -169,25 +251,38 @@ if (proxyConfigInput?.useApifyProxy !== false) {
     proxyUrl = await proxyConfiguration.newUrl();
 }
 
-// Launch browser directly via Playwright
+log.info(`PROXY URL: ${proxyUrl ? proxyUrl.replace(/:[^:@]+@/, ':***@') : 'none'}`);
+
 const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+    args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-web-security',
+    ],
 });
 
 const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     locale: 'it-IT',
-    extraHTTPHeaders: { 'Accept-Language': 'it-IT,it;q=0.9' },
+    extraHTTPHeaders: { 'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8' },
     ...(proxyUrl ? { proxy: { server: proxyUrl } } : {}),
 });
 
-// Visit homepage first to get cookies/session
-const warmupPage = await context.newPage();
-await warmupPage.goto('https://www.segugio.it/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-log.info('Warmup page loaded — cookies acquired');
-await warmupPage.waitForTimeout(1500);
-await warmupPage.close();
+// Warmup: visit homepage to get session cookies
+log.info('━━━ WARMUP: visiting https://www.segugio.it/');
+const warmup = await context.newPage();
+try {
+    const wRes = await warmup.goto('https://www.segugio.it/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    log.info(`━━━ WARMUP HTTP: ${wRes?.status()} | cookies: ${(await context.cookies()).length}`);
+    await warmup.waitForTimeout(2000);
+} catch (e) {
+    log.warning(`━━━ WARMUP FAILED: ${e.message}`);
+} finally {
+    await warmup.close();
+}
 
 const dataset    = await Dataset.open();
 const seenGlobal = new Set();
@@ -196,14 +291,12 @@ const limit      = maxItems > 0 ? maxItems * categories.length : Infinity;
 
 for (const cat of categories) {
     const def = CATEGORY_URLS[cat];
-    if (!def) { log.warning(`Unknown category: ${cat}`); continue; }
-
+    if (!def) continue;
     for (const url of def.urls) {
         const page = await context.newPage();
         try {
             const offers = await scrapePage(page, url, cat, includeSponsored);
-            log.info(`[${cat}] → ${offers.length} offers found`);
-
+            log.info(`━━━ [${cat}] FINAL: ${offers.length} offers to save`);
             for (const offer of offers) {
                 if (savedCount >= limit) break;
                 const key = `${offer.fornitore}||${offer.nomeOfferta}||${cat}`;
@@ -211,18 +304,17 @@ for (const cat of categories) {
                 seenGlobal.add(key);
                 await dataset.pushData(offer);
                 savedCount++;
-                log.info(`  [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
+                log.info(`  ✅ [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
             }
         } catch (e) {
-            log.error(`[${cat}] ${url}: ${e.message}`);
+            log.error(`━━━ [${cat}] ERROR: ${e.message}\n${e.stack}`);
         } finally {
             await page.close();
         }
-
         await new Promise(r => setTimeout(r, 2000));
     }
 }
 
 await browser.close();
-log.info(`Done. Total offers saved: ${savedCount}`);
+log.info(`━━━ DONE. Total saved: ${savedCount}`);
 await Actor.exit();
