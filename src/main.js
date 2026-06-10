@@ -1,7 +1,12 @@
 /**
- * Segugio.it Scraper v1.6.0 — diagnostic build
+ * Segugio.it Scraper v1.7.0
  *
- * Heavy logging to diagnose page structure and fix selectors.
+ * Fixes:
+ * - Try WITHOUT proxy first (Segugio may allow Apify datacenter IPs directly)
+ * - If blocked, retry with RESIDENTIAL proxy
+ * - waitUntil: 'commit' instead of 'domcontentloaded' (faster, less strict)
+ * - Increased timeouts
+ * - Abort image/font/css requests to speed up loading
  */
 
 import { Actor, log } from 'apify';
@@ -67,126 +72,102 @@ function parseCardLines(lines) {
     return r;
 }
 
-async function scrapePage(page, url, categoria, includeSponsored) {
-    log.info(`━━━ [${categoria}] NAVIGATING: ${url}`);
+async function createContext(browser, proxyUrl) {
+    const ctx = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        locale: 'it-IT',
+        extraHTTPHeaders: {
+            'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8',
+            'Referer': 'https://www.segugio.it/',
+        },
+        ...(proxyUrl ? { proxy: { server: proxyUrl } } : {}),
+    });
 
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const status   = response?.status();
-    log.info(`━━━ [${categoria}] HTTP STATUS: ${status}`);
+    // Block heavy resources to speed up loading
+    await ctx.route('**/*.{png,jpg,jpeg,gif,webp,woff,woff2,ttf,otf}', r => r.abort());
+    await ctx.route('**/{analytics,gtm,facebook,google-analytics,hotjar}**', r => r.abort());
 
-    // ── DIAGNOSTIC 1: page title and basic info
-    const title  = await page.title();
-    const bodyLen = await page.evaluate(() => document.body?.innerHTML?.length ?? 0);
-    log.info(`━━━ [${categoria}] PAGE TITLE: "${title}" | BODY HTML LENGTH: ${bodyLen}`);
+    return ctx;
+}
 
-    // ── DIAGNOSTIC 2: wait strategy — try multiple selectors
-    const selectors = [
-        'img[title^="Logo di "]',
-        'img[alt^="logo "]',
-        'img[alt^="Logo "]',
-        '[class*="card"]',
-        '[class*="offer"]',
-        '[class*="offerta"]',
-        '[class*="tariffa"]',
-        '[class*="provider"]',
-        '[class*="fornitore"]',
-        'article',
-    ];
-
-    log.info(`━━━ [${categoria}] CHECKING SELECTORS...`);
-    for (const sel of selectors) {
-        const count = await page.locator(sel).count();
-        if (count > 0) log.info(`  ✅ "${sel}" → ${count} elements`);
-        else           log.info(`  ❌ "${sel}" → 0`);
-    }
-
-    // ── DIAGNOSTIC 3: wait for content or timeout
-    let rendered = false;
+async function tryNavigate(page, url) {
+    // Try 'commit' first (fastest — just waits for response headers)
     try {
-        await page.waitForSelector('img[title^="Logo di "]', { timeout: 15000 });
-        rendered = true;
-        log.info(`━━━ [${categoria}] ✅ img[title^="Logo di "] appeared`);
-    } catch {
-        log.warning(`━━━ [${categoria}] ⚠️  img[title^="Logo di "] did NOT appear — trying scroll + wait`);
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight / 2));
-        await page.waitForTimeout(3000);
-        const countAfter = await page.locator('img[title^="Logo di "]').count();
-        log.info(`━━━ [${categoria}] After scroll: img[title^="Logo di "] count = ${countAfter}`);
-        if (countAfter > 0) rendered = true;
+        const res = await page.goto(url, { waitUntil: 'commit', timeout: 25000 });
+        return res;
+    } catch (e) {
+        log.warning(`commit failed (${e.message.slice(0,60)}), trying networkidle...`);
     }
+    // Fallback: networkidle
+    return await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+}
 
-    // ── DIAGNOSTIC 4: dump ALL img elements (first 20)
-    const allImgs = await page.evaluate(() =>
-        [...document.querySelectorAll('img')].slice(0, 20).map(img => ({
-            src:   img.getAttribute('src')   || '',
-            alt:   img.getAttribute('alt')   || '',
-            title: img.getAttribute('title') || '',
-        }))
-    );
-    log.info(`━━━ [${categoria}] ALL IMGS (first 20):`);
-    allImgs.forEach((img, i) => log.info(`  [${i}] alt="${img.alt}" title="${img.title}" src="${img.src.slice(0,80)}"`));
+async function scrapePage(page, url, categoria, includeSponsored) {
+    log.info(`━━━ [${categoria}] → ${url}`);
 
-    // ── DIAGNOSTIC 5: dump first 3000 chars of body text
-    const bodyText = await page.evaluate(() =>
-        document.body?.innerText?.slice(0, 3000) ?? ''
-    );
-    log.info(`━━━ [${categoria}] BODY TEXT (first 3000):\n${bodyText}`);
+    const response = await tryNavigate(page, url);
+    const status   = response?.status();
+    const bodyLen  = await page.evaluate(() => document.body?.innerHTML?.length ?? 0);
+    log.info(`━━━ [${categoria}] HTTP ${status} | body: ${bodyLen} chars`);
 
-    // ── DIAGNOSTIC 6: check for React / Next.js / SPA signals
-    const spaSignals = await page.evaluate(() => {
-        const signals = {};
-        signals.hasNextData      = !!document.getElementById('__NEXT_DATA__');
-        signals.hasReactRoot     = !!document.getElementById('root') || !!document.getElementById('app') || !!document.getElementById('__nuxt');
-        signals.scriptCount      = document.querySelectorAll('script[src]').length;
-        signals.hasWindow_data   = typeof window.__data !== 'undefined';
-        const scripts = [...document.querySelectorAll('script[src]')].map(s => s.src).filter(s => /chunk|main|app|vendor/i.test(s));
-        signals.bundleScripts    = scripts.slice(0, 5);
-        return signals;
-    });
-    log.info(`━━━ [${categoria}] SPA SIGNALS: ${JSON.stringify(spaSignals)}`);
-
-    // ── DIAGNOSTIC 7: look for offer data in script tags (JSON-LD or window.__data__)
-    const scriptData = await page.evaluate(() => {
-        const results = [];
-        document.querySelectorAll('script').forEach(s => {
-            const content = s.textContent || '';
-            if (content.length > 100 && (
-                content.includes('offerta') || content.includes('fornitore') ||
-                content.includes('prezzo') || content.includes('Edison') ||
-                content.includes('Enel') || content.includes('kWh')
-            )) {
-                results.push({
-                    type: s.getAttribute('type') || 'text/javascript',
-                    preview: content.slice(0, 400),
-                });
-            }
-        });
-        return results.slice(0, 3);
-    });
-
-    if (scriptData.length > 0) {
-        log.info(`━━━ [${categoria}] OFFER DATA IN SCRIPTS (${scriptData.length} found):`);
-        scriptData.forEach((s, i) => log.info(`  [${i}] type="${s.type}" preview: ${s.preview}`));
-    } else {
-        log.info(`━━━ [${categoria}] No offer data found in script tags`);
-    }
-
-    if (!rendered) {
-        log.warning(`━━━ [${categoria}] Could not find offer elements — returning 0 offers`);
+    if (bodyLen < 500) {
+        const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 200) ?? '');
+        log.warning(`━━━ [${categoria}] TINY BODY: "${bodyText}"`);
         return [];
     }
 
-    // ── EXTRACTION (same as before)
+    // Check key selectors
+    const checks = {
+        'img[title^="Logo di "]':  await page.locator('img[title^="Logo di "]').count(),
+        'img[alt^="logo "]':       await page.locator('img[alt^="logo "]').count(),
+        '[class*="card"]':         await page.locator('[class*="card"]').count(),
+        '[class*="offert"]':       await page.locator('[class*="offert"]').count(),
+        'article':                 await page.locator('article').count(),
+    };
+    log.info(`━━━ [${categoria}] SELECTORS: ${JSON.stringify(checks)}`);
+
+    // If no offers yet, wait and check SPA signals
+    if (checks['img[title^="Logo di "]'] === 0) {
+        log.info(`━━━ [${categoria}] Waiting for JS render (15s)...`);
+
+        // Check if it's a SPA
+        const spaSignals = await page.evaluate(() => ({
+            nextData:  !!document.getElementById('__NEXT_DATA__'),
+            reactRoot: !!document.getElementById('root') || !!document.getElementById('app'),
+            bodyText200: document.body?.innerText?.slice(0, 200) ?? '',
+            allImgTitles: [...document.querySelectorAll('img[title]')].slice(0,10).map(i => i.title),
+            allImgAlts:   [...document.querySelectorAll('img[alt]')].slice(0,10).map(i => i.alt),
+        }));
+        log.info(`━━━ [${categoria}] SPA: ${JSON.stringify(spaSignals)}`);
+
+        try {
+            await page.waitForSelector('img[title^="Logo di "]', { timeout: 15000 });
+            log.info(`━━━ [${categoria}] ✅ Offers rendered after wait`);
+        } catch {
+            // Scroll trigger
+            await page.evaluate(() => window.scrollTo(0, 500));
+            await page.waitForTimeout(3000);
+            const c = await page.locator('img[title^="Logo di "]').count();
+            log.info(`━━━ [${categoria}] After scroll: ${c} offer logos`);
+
+            if (c === 0) {
+                // Last resort: dump body text to diagnose
+                const txt = await page.evaluate(() => document.body?.innerText?.slice(0, 2000) ?? '');
+                log.info(`━━━ [${categoria}] BODY TEXT:\n${txt}`);
+                return [];
+            }
+        }
+    }
+
+    // Extract
     const rawOffers = await page.evaluate(() => {
         const offers = [], seen = new Set();
         document.querySelectorAll('img[title^="Logo di "]').forEach(logoEl => {
-            const title     = logoEl.getAttribute('title') || '';
-            const fornitore = title.replace(/^Logo di\s+/i, '').trim();
+            const fornitore = (logoEl.getAttribute('title') || '').replace(/^Logo di\s+/i, '').trim();
             if (!fornitore || seen.has(fornitore)) return;
             let card = logoEl.parentElement;
             for (let i = 0; i < 8; i++) {
-                const t = card?.textContent || '';
-                if (t.includes('al mese') || t.includes('Nome offerta')) break;
+                if ((card?.textContent || '').includes('al mese') || (card?.textContent || '').includes('Nome offerta')) break;
                 card = card?.parentElement;
             }
             if (!card) return;
@@ -203,12 +184,9 @@ async function scrapePage(page, url, categoria, includeSponsored) {
         return offers;
     });
 
-    log.info(`━━━ [${categoria}] RAW OFFERS FOUND: ${rawOffers.length}`);
-    if (rawOffers.length > 0) {
-        const first = rawOffers[0];
-        log.info(`━━━ [${categoria}] FIRST OFFER RAW:`);
-        log.info(`  fornitore: "${first.fornitore}"`);
-        log.info(`  lines (${first.lines.length}): ${JSON.stringify(first.lines.slice(0, 20))}`);
+    log.info(`━━━ [${categoria}] RAW OFFERS: ${rawOffers.length}`);
+    if (rawOffers[0]) {
+        log.info(`━━━ FIRST RAW: fornitore="${rawOffers[0].fornitore}" lines=${JSON.stringify(rawOffers[0].lines.slice(0, 15))}`);
     }
 
     const offers = [];
@@ -243,46 +221,68 @@ const {
     proxyConfig: proxyConfigInput,
 } = input;
 
-let proxyUrl;
-if (proxyConfigInput?.useApifyProxy !== false) {
-    const proxyConfiguration = await Actor.createProxyConfiguration(
-        proxyConfigInput ?? { useApifyProxy: true }
-    );
-    proxyUrl = await proxyConfiguration.newUrl();
-}
+// Build both proxy options: residential preferred, datacenter fallback, no-proxy last
+let residentialProxyUrl, datacenterProxyUrl;
+try {
+    const proxyCfg = await Actor.createProxyConfiguration({ useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] });
+    residentialProxyUrl = await proxyCfg.newUrl();
+} catch { /* no residential access */ }
+try {
+    const proxyCfg = await Actor.createProxyConfiguration({ useApifyProxy: true });
+    datacenterProxyUrl = await proxyCfg.newUrl();
+} catch { /* no proxy */ }
 
-log.info(`PROXY URL: ${proxyUrl ? proxyUrl.replace(/:[^:@]+@/, ':***@') : 'none'}`);
+log.info(`RESIDENTIAL proxy: ${residentialProxyUrl ? '✅' : '❌'}`);
+log.info(`DATACENTER proxy:  ${datacenterProxyUrl  ? '✅' : '❌'}`);
 
 const browser = await chromium.launch({
     headless: true,
     args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
-        '--disable-web-security',
     ],
 });
 
-const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    locale: 'it-IT',
-    extraHTTPHeaders: { 'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8' },
-    ...(proxyUrl ? { proxy: { server: proxyUrl } } : {}),
-});
+// Try contexts in order: residential → datacenter → no proxy
+const proxyOptions = [
+    { label: 'RESIDENTIAL', url: residentialProxyUrl },
+    { label: 'DATACENTER',  url: datacenterProxyUrl  },
+    { label: 'NO PROXY',    url: undefined            },
+];
 
-// Warmup: visit homepage to get session cookies
-log.info('━━━ WARMUP: visiting https://www.segugio.it/');
-const warmup = await context.newPage();
-try {
-    const wRes = await warmup.goto('https://www.segugio.it/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    log.info(`━━━ WARMUP HTTP: ${wRes?.status()} | cookies: ${(await context.cookies()).length}`);
-    await warmup.waitForTimeout(2000);
-} catch (e) {
-    log.warning(`━━━ WARMUP FAILED: ${e.message}`);
-} finally {
-    await warmup.close();
+let workingContext = null;
+let workingProxyLabel = null;
+
+for (const opt of proxyOptions) {
+    log.info(`Testing proxy: ${opt.label}...`);
+    const ctx  = await createContext(browser, opt.url);
+    const page = await ctx.newPage();
+    try {
+        const res = await page.goto('https://tariffe.segugio.it/', { waitUntil: 'commit', timeout: 20000 });
+        const status = res?.status();
+        const bodyLen = await page.evaluate(() => document.body?.innerHTML?.length ?? 0);
+        log.info(`  → HTTP ${status} | body ${bodyLen} chars`);
+        if (status === 200 && bodyLen > 1000) {
+            log.info(`  ✅ ${opt.label} WORKS`);
+            workingContext    = ctx;
+            workingProxyLabel = opt.label;
+            await page.close();
+            break;
+        }
+    } catch (e) {
+        log.warning(`  ❌ ${opt.label} failed: ${e.message.slice(0, 80)}`);
+    }
+    await page.close();
+    await ctx.close();
 }
+
+if (!workingContext) {
+    log.error('All proxy options failed — cannot reach segugio.it');
+    await browser.close();
+    await Actor.exit();
+}
+
+log.info(`Using proxy: ${workingProxyLabel}`);
 
 const dataset    = await Dataset.open();
 const seenGlobal = new Set();
@@ -293,10 +293,10 @@ for (const cat of categories) {
     const def = CATEGORY_URLS[cat];
     if (!def) continue;
     for (const url of def.urls) {
-        const page = await context.newPage();
+        const page = await workingContext.newPage();
         try {
             const offers = await scrapePage(page, url, cat, includeSponsored);
-            log.info(`━━━ [${cat}] FINAL: ${offers.length} offers to save`);
+            log.info(`━━━ [${cat}] FINAL: ${offers.length} offers`);
             for (const offer of offers) {
                 if (savedCount >= limit) break;
                 const key = `${offer.fornitore}||${offer.nomeOfferta}||${cat}`;
@@ -307,7 +307,7 @@ for (const cat of categories) {
                 log.info(`  ✅ [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
             }
         } catch (e) {
-            log.error(`━━━ [${cat}] ERROR: ${e.message}\n${e.stack}`);
+            log.error(`━━━ [${cat}] ERROR: ${e.message}`);
         } finally {
             await page.close();
         }
