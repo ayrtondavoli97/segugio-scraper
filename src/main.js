@@ -1,22 +1,13 @@
 /**
- * Italy Luce & Gas Offers Scraper v2.1.0
+ * Italy Luce & Gas Offers Scraper v2.2.0
  *
  * Source: ARERA Portale Offerte open data
- *   ilportaleofferte.it/portaleOfferte/it/open-data.page
+ * URL pattern: /opendata/csv/offerte/{YYYY}_{M}/PO_Offerte_{E|G}_PLACET_{YYYYMMDD}.csv
  *
- * URL patterns confirmed from real samples:
- *   PLACET CSV:  /resources/opendata/csv/offerte/{YYYY}_{M}/PO_Offerte_{E|G}_PLACET_{YYYYMMDD}.csv
- *   MLIBERO XML: /resources/opendata/csv/offerteML/{YYYY}_{M}/PO_Offerte_{E|G}_MLIBERO_{YYYYMMDD}.xml
- *
- *   YYYY = year, M = month (1-12, NOT zero-padded)
- *
- * Real samples observed:
- *   2025_2/PO_Offerte_E_PLACET_20250213.csv
- *   2025_3/PO_Offerte_E_MLIBERO_20250312.xml
- *   2024_3/PO_Offerte_D_MLIBERO_20240310.xml
- *   2023_1/PO_Offerte_E_PLACET_20230125.csv
- *
- * Files published: monthly, around day 6-13. Page says "Ultimo aggiornamento: 06-05-2026"
+ * v2.2 fixes:
+ * - Use GET with Range: bytes=0-1023 instead of HEAD (some servers don't allow HEAD)
+ * - Log status code of each attempt to diagnose what's actually returned
+ * - Search 120 days back
  */
 
 import { Actor, log } from 'apify';
@@ -24,42 +15,33 @@ import { gotScraping } from 'crawlee';
 
 const BASE = 'https://www.ilportaleofferte.it/portaleOfferte/resources/opendata/csv';
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
-
 function pad(n) { return String(n).padStart(2, '0'); }
-
 function dateToYmd(date) {
     return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
 }
-
-/**
- * Build URL for a given date and commodity.
- * commodity: 'E' (electricity) | 'G' (gas)
- * dataset: 'PLACET' | 'MLIBERO'
- */
 function buildUrl(date, commodity, dataset = 'PLACET') {
-    const year  = date.getFullYear();
-    const month = date.getMonth() + 1; // 1-12, NOT zero-padded
-    const ymd   = dateToYmd(date);
-    const ext   = dataset === 'MLIBERO' ? 'xml' : 'csv';
-    const dir   = dataset === 'MLIBERO' ? 'offerteML' : 'offerte';
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    const ymd = dateToYmd(date);
+    const ext = dataset === 'MLIBERO' ? 'xml' : 'csv';
+    const dir = dataset === 'MLIBERO' ? 'offerteML' : 'offerte';
     return `${BASE}/${dir}/${year}_${month}/PO_Offerte_${commodity}_${dataset}_${ymd}.${ext}`;
 }
 
-/** HEAD request to check if a URL exists (faster than GET) */
-async function urlExists(url, headers) {
+/** Probe URL with GET + Range header (1KB) to check existence */
+async function probeUrl(url, headers) {
     try {
         const res = await gotScraping({
             url,
-            method: 'HEAD',
-            headers,
+            method: 'GET',
+            headers: { ...headers, 'Range': 'bytes=0-1023' },
             timeout: { request: 8000 },
             throwHttpErrors: false,
-            followRedirect: false,
+            followRedirect: true,
         });
-        return res.statusCode === 200;
-    } catch {
-        return false;
+        return { status: res.statusCode, bytes: (res.body || '').length, sample: (res.body || '').slice(0, 200) };
+    } catch (e) {
+        return { status: -1, bytes: 0, error: e.message };
     }
 }
 
@@ -70,40 +52,48 @@ async function downloadText(url, headers) {
         throwHttpErrors: false,
         decompress: true,
     });
-    if (res.statusCode !== 200) throw new Error(`HTTP ${res.statusCode}`);
+    if (res.statusCode !== 200 && res.statusCode !== 206) throw new Error(`HTTP ${res.statusCode}`);
     return res.body;
 }
 
-/**
- * Find latest available CSV/XML for a given commodity and dataset.
- * Tries every day in the last 90 days; logs first few attempts for visibility.
- */
 async function findLatestFile(commodity, dataset, headers) {
     const today = new Date();
-    log.info(`Searching for latest ${commodity}/${dataset} file (90 days back)...`);
+    log.info(`Searching for latest ${commodity}/${dataset} file (120 days back)...`);
 
-    const triedUrls = [];
+    let firstStatus = null;
+    let firstError = null;
+    const statusCounts = {};
 
-    for (let daysBack = 0; daysBack < 90; daysBack++) {
+    for (let daysBack = 0; daysBack < 120; daysBack++) {
         const d = new Date(today);
         d.setDate(d.getDate() - daysBack);
         const url = buildUrl(d, commodity, dataset);
+        const probe = await probeUrl(url, headers);
 
-        if (triedUrls.length < 5) triedUrls.push(url);
+        statusCounts[probe.status] = (statusCounts[probe.status] || 0) + 1;
 
-        const exists = await urlExists(url, headers);
-        if (exists) {
-            log.info(`✅ Found: ${url} (${daysBack} days back)`);
+        // Log first 3 attempts in detail
+        if (daysBack < 3) {
+            log.info(`  [${daysBack}d] ${url.split('/').slice(-2).join('/')} → ${probe.status} (${probe.bytes}B) ${probe.sample.slice(0,80).replace(/\n/g, ' ')}`);
+        }
+
+        if (probe.status === 200 || probe.status === 206) {
+            log.info(`✅ Found: ${url} (status ${probe.status}, ${daysBack} days back)`);
             return url;
+        }
+
+        if (firstStatus === null) {
+            firstStatus = probe.status;
+            firstError = probe.error;
         }
     }
 
-    log.warning(`No file found in 90 days. First 5 URLs tried:`);
-    triedUrls.forEach(u => log.warning(`  - ${u}`));
+    log.warning(`No file found. First status seen: ${firstStatus}${firstError ? ` (${firstError})` : ''}`);
+    log.warning(`Status distribution over 120 attempts: ${JSON.stringify(statusCounts)}`);
     return null;
 }
 
-// ─── CSV parser ───────────────────────────────────────────────────────────────
+// ─── CSV parsing ──────────────────────────────────────────────────────────────
 
 function splitCsvLine(line, delim = ',') {
     const cells = [];
@@ -123,12 +113,10 @@ function parseCsv(text) {
     const lines = txt.split('\n').filter(l => l.trim());
     if (lines.length < 2) return { headers: [], rows: [] };
 
-    // Detect delimiter
     const firstLine = lines[0];
-    let delim = ',';
-    if (firstLine.includes(';') && !firstLine.includes(',')) delim = ';';
-
+    const delim = firstLine.includes(';') && !firstLine.includes(',') ? ';' : ',';
     const headers = splitCsvLine(firstLine, delim);
+
     const rows = lines.slice(1).map(l => {
         const cells = splitCsvLine(l, delim);
         const r = {};
@@ -147,7 +135,6 @@ function parseDec(raw) {
 function clean(s) { return (s || '').replace(/\s+/g, ' ').trim() || null; }
 
 function normalise(raw, sourceUrl, commodity) {
-    // Header names vary slightly across years — try multiple candidates
     const get = (...keys) => {
         const rowKeys = Object.keys(raw);
         for (const k of keys) {
@@ -159,14 +146,14 @@ function normalise(raw, sourceUrl, commodity) {
 
     return {
         commodity: commodity === 'E' ? 'luce' : 'gas',
-        fornitore: clean(get('ragione_sociale', 'ragione sociale', 'denominazione_venditore')),
-        partitaIva: get('partita_iva', 'p_iva', 'piva'),
+        fornitore: clean(get('ragione_sociale', 'denominazione_venditore')),
+        partitaIva: get('partita_iva', 'p_iva'),
         codiceFiscale: get('codice_fiscale'),
         sitoWeb: get('sito_web'),
         numeroVerde: get('numero_verde'),
-        nomeOfferta: clean(get('denominazione_offerta', 'denominazione')),
+        nomeOfferta: clean(get('denominazione_offerta')),
         codiceOfferta: get('codice_offerta'),
-        urlOfferta: get('url_offerta', 'url '),
+        urlOfferta: get('url_offerta'),
         tipoCliente: get('tipo_cliente'),
         tipoPrezzo: get('tipo_prezzo'),
         canaliAttivazione: clean(get('canali_attivazione')),
@@ -213,7 +200,6 @@ for (const cat of categories) {
     const commodity = cat === 'luce' ? 'E' : cat === 'gas' ? 'G' : null;
     if (!commodity) continue;
 
-    // Find latest PLACET CSV
     const url = await findLatestFile(commodity, 'PLACET', HEADERS);
     if (!url) {
         log.error(`No ${cat} CSV available — skipping`);
@@ -232,14 +218,13 @@ for (const cat of categories) {
 
     const { rows, headers } = parseCsv(csvText);
     log.info(`[${cat}] Parsed ${rows.length} rows`);
-    log.info(`[${cat}] Headers (${headers.length}): ${headers.join(' | ')}`);
-    if (rows[0]) log.info(`[${cat}] First row sample: ${JSON.stringify(Object.fromEntries(Object.entries(rows[0]).slice(0, 10)))}`);
+    log.info(`[${cat}] Headers (${headers.length}): ${headers.slice(0, 20).join(' | ')}`);
+    if (rows[0]) log.info(`[${cat}] First row: ${JSON.stringify(Object.fromEntries(Object.entries(rows[0]).slice(0, 8)))}`);
 
     let catCount = 0;
     for (const raw of rows) {
         if (savedCount >= limit) break;
         const rec = normalise(raw, url, commodity);
-
         if (tipoCliente && !(rec.tipoCliente || '').toLowerCase().includes(tipoCliente.toLowerCase())) continue;
         if (tipoPrezzo && !(rec.tipoPrezzo || '').toLowerCase().includes(tipoPrezzo.toLowerCase())) continue;
         if (fornitoreFilter && !(rec.fornitore || '').toLowerCase().includes(fornitoreFilter.toLowerCase())) continue;
