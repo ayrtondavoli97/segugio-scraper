@@ -1,8 +1,8 @@
 {
     "actorSpecification": 1,
-    "name": "segugio-scraper",
-    "title": "Segugio.it Scraper — Energy, Insurance & Telecom Offers Italy",
-    "description": "Scrape all offers from Segugio.it: electricity, gas, internet/fiber, mobile plans. Italy's #1 price comparison portal. Returns provider, offer name, price/kWh, monthly cost, fixed/variable type, contract duration, bonuses.",
+    "name": "italy-energy-telecom-scraper",
+    "title": "Italy Energy & Telecom Offers Scraper — SOStariffe.it",
+    "description": "Scrape electricity, gas, internet and mobile offers from SOStariffe.it — Italy's top price comparison portal. Returns provider, offer name, price/kWh, monthly cost, contract type, bonuses.",
     "version": "1.0",
     "buildTag": "latest",
     "dockerfile": "../Dockerfile",
@@ -43,23 +43,74 @@
                     "display": {
                         "component": "table",
                         "properties": {
-                            "categoria":        { "label": "Category",          "format": "text" },
-                            "fornitore":        { "label": "Provider",          "format": "text" },
-                            "nomeOfferta":      { "label": "Offer name",        "format": "text" },
-                            "prezzoMensile":    { "label": "Monthly cost",      "format": "text" },
-                            "prezzoMensileEur": { "label": "Monthly cost (€)",  "format": "number" },
-                            "prezzoCommodity":  { "label": "Unit price",        "format": "text" },
-                            "unitaCommodity":   { "label": "Unit",              "format": "text" },
-                            "quotaFissa":       { "label": "Fixed fee",         "format": "text" },
-                            "quotaFissaEur":    { "label": "Fixed fee (€)",     "format": "number" },
-                            "tipologiaPrezzo":  { "label": "Price type",        "format": "text" },
-                            "durataContratto":  { "label": "Contract duration", "format": "text" },
-                            "bonus":            { "label": "Bonuses",           "format": "text" },
-                            "sponsorizzata":    { "label": "Sponsored",         "format": "text" },
-                            "urlOfferta":       { "label": "Offer URL",         "format": "link" },
-                            "logoFornitore":    { "label": "Provider logo",     "format": "link" },
-                            "fonte":            { "label": "Source URL",        "format": "link" },
-                            "scrapedAt":        { "label": "Scraped at",        "format": "text" }
+                            "categoria": {
+                                "label": "Category",
+                                "format": "text"
+                            },
+                            "fornitore": {
+                                "label": "Provider",
+                                "format": "text"
+                            },
+                            "nomeOfferta": {
+                                "label": "Offer name",
+                                "format": "text"
+                            },
+                            "prezzoMensile": {
+                                "label": "Monthly cost",
+                                "format": "text"
+                            },
+                            "prezzoMensileEur": {
+                                "label": "Monthly cost (€)",
+                                "format": "number"
+                            },
+                            "prezzoCommodity": {
+                                "label": "Unit price",
+                                "format": "text"
+                            },
+                            "unitaCommodity": {
+                                "label": "Unit",
+                                "format": "text"
+                            },
+                            "quotaFissa": {
+                                "label": "Fixed fee",
+                                "format": "text"
+                            },
+                            "quotaFissaEur": {
+                                "label": "Fixed fee (€)",
+                                "format": "number"
+                            },
+                            "tipologiaPrezzo": {
+                                "label": "Price type",
+                                "format": "text"
+                            },
+                            "durataContratto": {
+                                "label": "Contract duration",
+                                "format": "text"
+                            },
+                            "bonus": {
+                                "label": "Bonuses",
+                                "format": "text"
+                            },
+                            "sponsorizzata": {
+                                "label": "Sponsored",
+                                "format": "text"
+                            },
+                            "urlOfferta": {
+                                "label": "Offer URL",
+                                "format": "link"
+                            },
+                            "logoFornitore": {
+                                "label": "Provider logo",
+                                "format": "link"
+                            },
+                            "fonte": {
+                                "label": "Source URL",
+                                "format": "link"
+                            },
+                            "scrapedAt": {
+                                "label": "Scraped at",
+                                "format": "text"
+                            }
                         }
                     }
                 }
