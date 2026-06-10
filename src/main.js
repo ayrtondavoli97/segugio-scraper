@@ -1,1 +1,6 @@
-import{Actor as A}from'apify';await A.init();let i=await A.getInput()||{},cats=i.categories||['luce','gas'],lim=i.maxItems||20,base='https://www.ilportaleofferte.it',p=base+'/portaleOfferte/it/open-data.page',html=await(await fetch(p)).text(),rx=/href="([^"]+(PO_(Offerte|Parametri)_[^"]+\.(xml|csv)))"/g,links=[],m;while((m=rx.exec(html)))links.push(base+m[1]);for(let c of cats){let tag=c=='gas'?'_G_':'_E_',ls=links.filter(x
+import{Actor}from'apify';
+await Actor.init();
+const url='https://www.ilportaleofferte.it/portaleOfferte/it/open-data.page';
+const res=await fetch(url,{headers:{'user-agent':'Mozilla/5.0'}});
+const text=await res.text();
+await Actor.pushData({source:'portale_offerte',url,status:res.status,ok:res.ok,title:(text.match(/<title>(.*?)<\/title>/i)||[])[1]||'',sample:text.replace(/<[^>]+>/g,' ').replace(/
