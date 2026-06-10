@@ -159,15 +159,8 @@ const crawler = new CheerioCrawler({
     maxConcurrency: 2,
     maxRequestsPerMinute: 15,
     requestHandlerTimeoutSecs: 45,
-    // Disable Crawlee's automatic fingerprinting that triggers WAF
     useSessionPool: false,
     persistCookiesPerSession: false,
-    headerGeneratorOptions: {
-        browsers: [],
-        devices: [],
-        locales: [],
-        operatingSystems: [],
-    },
 
     async requestHandler({ $, request }) {
         const { categoria } = request.userData;
