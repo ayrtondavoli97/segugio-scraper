@@ -1,12 +1,12 @@
 {
     "actorOutputSchemaVersion": 1,
-    "title": "Segugio.it Offers Dataset",
-    "description": "Italian energy, internet and mobile offers from Segugio.it — Italy's #1 price comparison portal.",
+    "title": "Italy Luce & Gas Offers Dataset",
+    "description": "Italian electricity and gas offers from ARERA Portale Offerte open data.",
     "properties": {
         "offers": {
             "type": "string",
             "title": "Offers",
-            "description": "Energy, internet and mobile offers scraped from Segugio.it.",
+            "description": "Energy offers from all Italian suppliers.",
             "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
         }
     }

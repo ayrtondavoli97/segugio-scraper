@@ -1,1 +1,73 @@
-{"actorSpecification":1,"name":"italy-luce-gas-offers-scraper","title":"Italy Luce & Gas Offers Scraper","description":"Scrapes public Segugio.it electricity and gas pages.","version":"1.1","buildTag":"latest","dockerfile":"../Dockerfile","input":"./input_schema.json","output":"./output_schema.json"}
+{
+    "actorSpecification": 1,
+    "name": "italy-luce-gas-offers-scraper",
+    "title": "Italy Luce & Gas Offers — Official ARERA Data",
+    "description": "Extract all active electricity and gas offers from ALL Italian suppliers via the official ARERA Portale Offerte open data. Includes supplier name, offer name, price type, prices per kWh (F1/F2/F3), customer type, contract details. Updated daily. CC-BY.",
+    "version": "2.0",
+    "buildTag": "latest",
+    "dockerfile": "../Dockerfile",
+    "input": "./input_schema.json",
+    "output": "./output_schema.json",
+    "defaultRunOptions": {
+        "timeoutSecs": 300,
+        "memoryMbytes": 512
+    },
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "title": "Energy Offers Dataset",
+            "views": {
+                "overview": {
+                    "title": "Offers",
+                    "transformation": {
+                        "fields": [
+                            "commodity",
+                            "fornitore",
+                            "nomeOfferta",
+                            "tipoCliente",
+                            "tipoPrezzo",
+                            "spesaAnnuaEur",
+                            "prezzoMonorarioEurKwh",
+                            "prezzoF1EurKwh",
+                            "prezzoF2EurKwh",
+                            "prezzoF3EurKwh",
+                            "canaliAttivazione",
+                            "modalitaPagamento",
+                            "dataInizio",
+                            "dataFine",
+                            "urlOfferta",
+                            "sitoWeb",
+                            "numeroVerde",
+                            "partitaIva",
+                            "fonte"
+                        ]
+                    },
+                    "display": {
+                        "component": "table",
+                        "properties": {
+                            "commodity":             { "label": "Commodity",       "format": "text" },
+                            "fornitore":             { "label": "Supplier",        "format": "text" },
+                            "nomeOfferta":           { "label": "Offer name",      "format": "text" },
+                            "tipoCliente":           { "label": "Customer type",   "format": "text" },
+                            "tipoPrezzo":            { "label": "Price type",      "format": "text" },
+                            "spesaAnnuaEur":         { "label": "Annual cost (€)", "format": "number" },
+                            "prezzoMonorarioEurKwh": { "label": "Mono price (€/kWh)", "format": "number" },
+                            "prezzoF1EurKwh":        { "label": "F1 (€/kWh)",      "format": "number" },
+                            "prezzoF2EurKwh":        { "label": "F2 (€/kWh)",      "format": "number" },
+                            "prezzoF3EurKwh":        { "label": "F3 (€/kWh)",      "format": "number" },
+                            "canaliAttivazione":     { "label": "Activation channels", "format": "text" },
+                            "modalitaPagamento":     { "label": "Payment methods", "format": "text" },
+                            "dataInizio":            { "label": "Valid from",      "format": "text" },
+                            "dataFine":              { "label": "Valid until",     "format": "text" },
+                            "urlOfferta":            { "label": "Offer URL",       "format": "link" },
+                            "sitoWeb":               { "label": "Website",         "format": "link" },
+                            "numeroVerde":           { "label": "Toll-free",       "format": "text" },
+                            "partitaIva":            { "label": "VAT number",      "format": "text" },
+                            "fonte":                 { "label": "Source",          "format": "link" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

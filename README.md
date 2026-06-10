@@ -1,79 +1,75 @@
-# Segugio.it Scraper — Energy, Internet & Mobile Offers Italy 🔌📱
+# Italy Luce & Gas Offers — Official ARERA Open Data 💡⚡
 
-**Scrape all publicly listed offers from Segugio.it** — Italy's #1 price comparison portal for energy, internet, and mobile plans.
+**Extract all active Italian electricity and gas offers from the official ARERA Portale Offerte open data.**
 
----
-
-## What it scrapes
-
-| Category | Source | What you get |
-|---|---|---|
-| **Electricity** (luce) | tariffe.segugio.it | Provider, price/kWh, monthly cost, fixed/variable |
-| **Gas** | tariffe.segugio.it | Provider, price/Smc, monthly cost, contract type |
-| **Electricity + Gas** (dual fuel) | tariffe.segugio.it | Combined offers from major providers |
-| **Internet / Fiber** | tariffe.segugio.it | Provider, speed, monthly price, activation cost |
-| **Mobile** | tariffe.segugio.it | Operator, GB data, calls, monthly price |
+Source: [www.ilportaleofferte.it](https://www.ilportaleofferte.it/portaleOfferte/it/open-data.page) — Acquirente Unico S.p.A.
+License: CC-BY — public open data, free to reuse commercially.
 
 ---
 
-## Output fields
+## Why this actor
+
+The **Portale Offerte** is the official Italian price comparison portal regulated by ARERA (Italian Energy Regulator). By law, every Italian electricity and gas supplier must publish their active offers here. The data is released as daily CSV/XML files containing **all offers from all suppliers** — domestic and business, PLACET and Mercato Libero.
+
+Until now, accessing this data programmatically required parsing files manually. This actor does it for you in seconds.
+
+---
+
+## What you get
 
 | Field | Description |
 |---|---|
-| `categoria` | Category: `luce`, `gas`, `luce-gas`, `internet`, `mobile` |
-| `fornitore` | Provider name (e.g. Enel Energia, Edison, Sorgenia, Tim, Vodafone) |
-| `nomeOfferta` | Offer name (e.g. "Web Luce", "Dynamic Gas", "Super Fibra 1Gb") |
-| `prezzoMensileEur` | Estimated monthly cost in EUR |
-| `prezzoCommodity` | Unit price as displayed (e.g. "0,122 €/kWh", "PUN + 0,014 €/kWh") |
-| `unitaCommodity` | Unit (€/kWh for electricity, €/Smc for gas, €/mese for internet) |
-| `quotaFissaEur` | Fixed monthly fee in EUR |
-| `tipologiaPrezzo` | Price type: "Fisso 12 mesi", "Fisso 24 mesi", "Variabile" |
-| `bonus` | Promotional bonuses (e.g. "Fino a 55€ di sconto") |
-| `sponsorizzata` | Whether the offer is a paid placement |
-| `urlOfferta` | Direct link to the offer on Segugio.it |
-| `logoFornitore` | Provider logo URL |
-| `fonte` | Source page URL |
-| `scrapedAt` | ISO timestamp of scrape |
+| `commodity` | `luce` (electricity) or `gas` |
+| `fornitore` | Supplier company name |
+| `nomeOfferta` | Offer name (e.g. "PLACET LUCE FISSO DOMESTICO") |
+| `tipoCliente` | Customer type: domestico / non domestico |
+| `tipoPrezzo` | Price type: fisso (fixed) / variabile (variable) |
+| `spesaAnnuaEur` | Estimated annual cost in EUR |
+| `prezzoMonorarioEurKwh` | Single-rate price (€/kWh) |
+| `prezzoF1EurKwh` | Peak hours price (F1, €/kWh) |
+| `prezzoF2EurKwh` | Mid-peak hours price (F2, €/kWh) |
+| `prezzoF3EurKwh` | Off-peak hours price (F3, €/kWh) |
+| `canaliAttivazione` | How to activate (web, phone, store) |
+| `modalitaPagamento` | Accepted payment methods |
+| `dataInizio` / `dataFine` | Validity period |
+| `urlOfferta` | Direct link to the offer page |
+| `sitoWeb` | Supplier website |
+| `numeroVerde` | Toll-free phone |
+| `partitaIva` | Supplier VAT number |
 
 ---
 
-## Input options
+## Input
 
 | Parameter | Default | Description |
 |---|---|---|
-| `categories` | `["luce","gas","internet","mobile"]` | Categories to scrape |
-| `includeSponsored` | `true` | Include paid/sponsored placements |
-| `maxItems` | `0` | Max offers per category (0 = all) |
-| `proxyConfig` | Apify proxy | Proxy configuration |
+| `categories` | `["luce","gas"]` | Categories to scrape |
+| `tipoCliente` | `""` | Filter: domestico / non domestico |
+| `tipoPrezzo` | `""` | Filter: fisso / variabile |
+| `fornitoreFilter` | `""` | Partial match on supplier name |
+| `maxItems` | `0` | Max results (0 = all) |
 
 ---
 
 ## Example use cases
 
-- **Energy brokers & consultants** — monitor daily pricing across all Italian providers
-- **Fintech / comparison apps** — feed a live pricing engine for Italy
-- **Market researchers** — track price evolution over time (schedule daily)
-- **Journalists / consumer advocates** — benchmark Italy's energy market
-- **B2B leads** — identify which providers are most active in specific markets
+- **Energy brokers & comparison sites** — get fresh daily data on all Italian offers
+- **Fintech apps** — feed live price comparison engines
+- **Researchers** — analyse market structure, price evolution, supplier coverage
+- **Lead generators** — identify suppliers active in specific segments
+- **Consumer advocates** — track the cheapest offers across regions
 
 ---
 
-## Providers covered
+## Source & legal
 
-**Energy:** Enel Energia, Plenitude (ex Eni), Edison, Iren, Engie, Sorgenia, A2A Energia, Wekiwi, Illumia, Luce+Gas Italia and 30+ more
+- **Source URL pattern:** `ilportaleofferte.it/.../resources/opendata/csv/offerte/{YYYY}_{N}/PO_Offerte_{E|G}_PLACET_{YYYYMMDD}.csv`
+- **Publisher:** Acquirente Unico S.p.A. (ARERA designated body)
+- **Update frequency:** daily
+- **License:** [CC-BY](https://creativecommons.org/licenses/by/4.0/) — open data
+- **Legal basis:** Legge Concorrenza 2017
 
-**Internet:** TIM, Vodafone, WindTre, Fastweb, Sky WiFi, Tiscali, Very Mobile Fiber and more
-
-**Mobile:** TIM, Vodafone, WindTre, Iliad, Sky Mobile, ho. Mobile, Spusu, Fastweb Mobile and more
-
----
-
-## Scheduling
-
-Run daily to track price changes:
-```
-Cron: 0 7 * * *
-```
+Schedule daily (`0 9 * * *`) to keep your dataset current.
 
 ---
 

@@ -1,1 +1,51 @@
-{"title":"Italy Luce Gas Scraper Input","type":"object","schemaVersion":1,"properties":{"categories":{"title":"Categories","type":"array","description":"Energy categories to scrape.","editor":"select","items":{"type":"string","enum":["luce","gas"],"enumTitles":["Electricity","Gas"]},"default":["luce","gas"]}}}
+{
+    "title": "Italy Luce & Gas Offers Scraper (ARERA)",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "categories": {
+            "title": "Categories",
+            "type": "array",
+            "description": "Which categories to scrape: 'luce' (electricity) and/or 'gas'.",
+            "editor": "select",
+            "items": {
+                "type": "string",
+                "enum": ["luce", "gas"],
+                "enumTitles": ["Electricity (luce)", "Gas"]
+            },
+            "default": ["luce", "gas"]
+        },
+        "tipoCliente": {
+            "title": "Customer type",
+            "type": "string",
+            "description": "Filter by customer type. Empty = all.",
+            "editor": "select",
+            "enum": ["", "domestico", "non domestico"],
+            "enumTitles": ["All", "Residential (domestico)", "Business (non domestico)"],
+            "default": ""
+        },
+        "tipoPrezzo": {
+            "title": "Price type",
+            "type": "string",
+            "description": "Filter by price type. Empty = all.",
+            "editor": "select",
+            "enum": ["", "fisso", "variabile"],
+            "enumTitles": ["All", "Fixed price", "Variable price"],
+            "default": ""
+        },
+        "fornitoreFilter": {
+            "title": "Filter by supplier name",
+            "type": "string",
+            "description": "Optional — only return offers from suppliers whose name contains this string (case-insensitive). E.g. 'enel', 'edison', 'sorgenia'.",
+            "editor": "textfield",
+            "default": ""
+        },
+        "maxItems": {
+            "title": "Max items",
+            "type": "integer",
+            "description": "Maximum total results across all categories. 0 = no limit (typically 1000-5000 offers).",
+            "default": 0,
+            "minimum": 0
+        }
+    }
+}
