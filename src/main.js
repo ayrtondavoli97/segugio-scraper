@@ -1,211 +1,270 @@
 /**
- * Segugio.it Scraper v1.0.0
+ * Segugio.it Scraper v1.1.0
  *
- * Scrapes all publicly available offers from Segugio.it:
- *   - Electricity (luce)     tariffe.segugio.it/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx
- *   - Gas                    tariffe.segugio.it/costo-gas-metano/lista-offerte-gas-metano.aspx
- *   - Dual fuel (luce+gas)   tariffe.segugio.it/migliori-tariffe/migliori-tariffe-luce-gas.aspx
- *   - Internet/fiber         tariffe.segugio.it/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx
- *   - Mobile                 tariffe.segugio.it/tariffe-cellulari/
+ * Scrapes offers from Segugio.it:
+ *   - Electricity (luce)
+ *   - Gas
+ *   - Dual fuel (luce+gas)
+ *   - Internet/fiber
+ *   - Mobile
  *
- * HTML structure (confirmed from live pages):
- *   Each offer card contains:
- *     - Provider logo img[alt^="logo "] → fornitore
- *     - "Nome offerta" label + value
- *     - "Prezzo Luce/Gas" label + value (e.g. "0,122 €/kWh")
- *     - "Quota fissa" label + value (e.g. "7,50 €/mese")
- *     - "Prezzo" label + value (e.g. "Fisso 12 mesi" / "Variabile")
- *     - Monthly cost in large text (e.g. "31,87 €")
- *     - Bonus text (sparkles icon + text)
- *     - "Annuncio sponsorizzato" flag
+ * HTML structure confirmed from live pages.
+ * Each card is separated by <hr> and rendered TWICE (desktop+mobile).
+ * We use the FIRST instance only (more complete data).
+ *
+ * Card structure (within each block between <hr> tags):
+ *   img[title^="Logo di "]  → fornitore name + logo URL
+ *   "XX,XX €\nal mese"     → prezzoMensile
+ *   Lines: "Nome offerta\nVALUE", "Prezzo Luce\nVALUE", "Quota fissa\nVALUE", "Prezzo\nVALUE"
+ *   img[src*="sparkles"] sibling text → bonus
+ *   "*Annuncio sponsorizzato" → sponsorizzata
+ *   a[href] containing "scopri" or known CTA patterns → urlOfferta
  */
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 
-// ─── URL map ──────────────────────────────────────────────────────────────────
+const BASE = 'https://tariffe.segugio.it';
 
+// Only use main listing pages — sub-pages (prezzo-fisso etc.) get 403
 const CATEGORY_URLS = {
     luce: {
         label: 'Electricity',
+        commodity: 'luce',
         urls: [
-            'https://tariffe.segugio.it/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx',
-            'https://tariffe.segugio.it/costo-energia-elettrica/lista-offerte-luce-prezzo-fisso.aspx',
-            'https://tariffe.segugio.it/costo-energia-elettrica/lista-offerte-luce-prezzo-variabile.aspx',
+            `${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`,
         ],
     },
     gas: {
         label: 'Gas',
+        commodity: 'gas',
         urls: [
-            'https://tariffe.segugio.it/costo-gas-metano/lista-offerte-gas-metano.aspx',
-            'https://tariffe.segugio.it/costo-gas-metano/lista-offerte-gas-prezzo-fisso.aspx',
-            'https://tariffe.segugio.it/costo-gas-metano/lista-offerte-gas-prezzo-variabile.aspx',
+            `${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`,
         ],
     },
     'luce-gas': {
         label: 'Electricity + Gas',
+        commodity: 'dual',
         urls: [
-            'https://tariffe.segugio.it/migliori-tariffe/migliori-tariffe-luce-gas.aspx',
-            'https://tariffe.segugio.it/migliori-tariffe/migliori-tariffe-luce.aspx',
-            'https://tariffe.segugio.it/migliori-tariffe/migliori-tariffe-gas.aspx',
+            `${BASE}/migliori-tariffe/migliori-tariffe-luce-gas.aspx`,
         ],
     },
     internet: {
         label: 'Internet / Fiber',
+        commodity: 'internet',
         urls: [
-            'https://tariffe.segugio.it/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx',
-            'https://tariffe.segugio.it/tariffe-adsl-internet/offerte-fibra-ottica.aspx',
-            'https://tariffe.segugio.it/tariffe-adsl-internet/offerte-fibra-1000-mega.aspx',
+            `${BASE}/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx`,
         ],
     },
     mobile: {
         label: 'Mobile',
+        commodity: 'mobile',
         urls: [
-            'https://tariffe.segugio.it/tariffe-cellulari/',
+            `${BASE}/tariffe-cellulari/`,
         ],
     },
 };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/** Parse "31,87 €" or "31.87" → number */
 function parseEur(raw) {
     if (!raw) return null;
     const n = parseFloat(raw.replace(/[€\s]/g, '').replace(/\./g, '').replace(',', '.'));
     return isNaN(n) ? null : Math.round(n * 100) / 100;
 }
 
-/** Clean text: collapse whitespace, strip leading/trailing */
 function clean(s) {
     return (s || '').replace(/\s+/g, ' ').trim() || null;
 }
 
 /**
- * Extract offers from a Segugio.it listing page.
+ * Parse a block of text (one offer card) into structured fields.
  *
- * HTML structure (confirmed from live fetches):
+ * The card text has this line structure (newline-separated):
+ *   ...
+ *   Nome offerta
+ *   Web Luce
+ *   Prezzo Luce        (or "Prezzo Gas" for gas cards)
+ *   0,122 €/kWh
+ *   Quota fissa
+ *   7,50 €/mese
+ *   Prezzo
+ *   Fisso 12 mesi
+ *   ...
+ *   sparkles (icon text or preceding text)
+ *   Bonus description
+ *   ...
+ */
+function parseCardText(lines) {
+    const KNOWN_LABELS = new Set([
+        'Nome offerta', 'Prezzo Luce', 'Prezzo Gas', 'Prezzo energia',
+        'Quota fissa', 'Prezzo', 'Velocità', 'Tecnologia', 'GB inclusi',
+        'Minuti', 'SMS',
+    ]);
+
+    const result = {
+        nomeOfferta: null,
+        prezzoCommodity: null,
+        unitaCommodity: null,
+        quotaFissa: null,
+        quotaFissaEur: null,
+        tipologiaPrezzo: null,
+        prezzoMensile: null,
+        prezzoMensileEur: null,
+        bonus: null,
+        sponsorizzata: false,
+        esclusiva: false,
+    };
+
+    // Monthly price: "XX,XX €" followed by "al mese" on next line or same
+    for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+
+        // Monthly price
+        if (/^\d[\d.,]* €$/.test(l) && i + 1 < lines.length && lines[i+1] === 'al mese') {
+            result.prezzoMensile = `${l} al mese`;
+            result.prezzoMensileEur = parseEur(l);
+        }
+
+        // Sponsored
+        if (/Annuncio sponsorizzato/i.test(l)) result.sponsorizzata = true;
+        if (/Offerta esclusiva/i.test(l)) result.esclusiva = true;
+
+        // Label/value pairs
+        if (KNOWN_LABELS.has(l) && i + 1 < lines.length) {
+            const val = lines[i + 1];
+            if (val && !KNOWN_LABELS.has(val) && val !== 'al mese' && val !== 'Altri dettagli') {
+                switch (l) {
+                    case 'Nome offerta':
+                        result.nomeOfferta = clean(val);
+                        break;
+                    case 'Prezzo Luce':
+                    case 'Prezzo Gas':
+                    case 'Prezzo energia': {
+                        result.prezzoCommodity = clean(val);
+                        const unitMatch = val.match(/€\/(\w+)/);
+                        result.unitaCommodity = unitMatch ? `€/${unitMatch[1]}` : null;
+                        break;
+                    }
+                    case 'Quota fissa':
+                        result.quotaFissa = clean(val);
+                        result.quotaFissaEur = parseEur(val);
+                        break;
+                    case 'Prezzo':
+                        // Only take clean price type values, not commodity prices
+                        if (!/€\//.test(val) && !/\d,\d/.test(val)) {
+                            result.tipologiaPrezzo = clean(val);
+                        }
+                        break;
+                }
+            }
+        }
+    }
+
+    // Bonus: text after "sparkles" icon line or matching bonus patterns
+    const bonusPatterns = [
+        /^(Fino a .+)/i,
+        /^(Sconto .+)/i,
+        /^(Cashback .+)/i,
+        /^(\d+€.+sconto.+)/i,
+        /^(La nuova .+)/i,
+        /^(\d+€\/mese .+)/i,
+    ];
+    for (const line of lines) {
+        for (const pat of bonusPatterns) {
+            const m = line.match(pat);
+            if (m) { result.bonus = clean(m[1]); break; }
+        }
+        if (result.bonus) break;
+    }
+
+    return result;
+}
+
+/**
+ * Extract all offers from a Segugio.it listing page using Cheerio.
  *
- * Each offer block contains multiple sub-sections:
- *   - img[alt^="logo "] → provider name + logo URL
- *   - Large price "XX,XX €\nal mese" → monthly cost
- *   - Definition rows: "Nome offerta", "Prezzo Luce/Gas", "Quota fissa", "Prezzo"
- *   - Bonus: sparkles icon sibling text
- *   - Sponsored: "Annuncio sponsorizzato" text
- *   - CTA link "Scopri l'offerta" → offer URL
- *
- * Segugio renders each offer TWICE (desktop + mobile card) so we dedup by (fornitore+nomeOfferta).
+ * Key insight: each offer is between two <hr> elements.
+ * The first img with title="Logo di NOME" gives the provider.
+ * We skip the second (mobile) copy by deduplicating on fornitore+nome.
  */
 function extractOffers($, sourceUrl, categoria, includeSponsored) {
     const offers = [];
     const seen = new Set();
 
-    // Find all provider logos — each marks the start of an offer card
-    $('img[alt^="logo "]').each((_, logoEl) => {
+    // Strategy: find all images whose title starts with "Logo di "
+    // These mark the start of each offer card
+    $('img[title^="Logo di "]').each((_, logoEl) => {
         const $logo = $(logoEl);
+        const title = $logo.attr('title') || '';
+        const fornitore = clean(title.replace(/^Logo di\s+/i, ''));
+        const logoUrl   = $logo.attr('src') || null;
 
-        // Get the container: walk up to find a block that contains the full card
-        // Segugio wraps each card in a div with class containing "card" or similar
-        // We use the logo's closest ancestor that has price info
-        let $card = $logo.closest('div, article, section').first();
+        if (!fornitore) return;
 
-        // If the card is too small, walk up
-        for (let i = 0; i < 6; i++) {
-            if ($card.text().includes('al mese') || $card.text().includes('€/kWh') || $card.text().includes('€/Smc') || $card.text().includes('€/mese')) break;
+        // Walk up to find the containing card block
+        // Segugio wraps each in a div; we go up until we find something
+        // that contains "al mese" (indicates it's a complete card)
+        let $card = $logo.parent();
+        for (let i = 0; i < 8; i++) {
+            if ($card.text().includes('al mese') || $card.text().includes('Nome offerta')) break;
             $card = $card.parent();
         }
 
-        // Provider name from alt attribute
-        const altText = $logo.attr('alt') || '';
-        const fornitore = clean(altText.replace(/^logo\s+/i, '')) || null;
-        const logoUrl   = $logo.attr('src') || null;
+        const rawText = $card.text();
 
-        // Skip duplicate cards (Segugio renders desktop + mobile versions)
-        const cardText  = $card.text().replace(/\s+/g, ' ').trim();
+        // Dedup: skip if we've already seen this fornitore on this page
+        // (avoids desktop+mobile duplicate)
+        if (seen.has(fornitore)) return;
 
-        // Extract monthly price — look for the large "XX,XX € al mese" pattern
-        const monthlyMatch = cardText.match(/([\d.,]+)\s*€\s*al\s*mese/i);
-        const prezzoMensile    = monthlyMatch ? monthlyMatch[0].replace(/\s+/g, ' ').trim() : null;
-        const prezzoMensileEur = monthlyMatch ? parseEur(monthlyMatch[1]) : null;
+        // Parse the card text line by line
+        const lines = rawText
+            .split(/\n/)
+            .map(l => l.trim())
+            .filter(l => l && l !== '\n');
 
-        // Extract labeled fields from the card text
-        // Pattern: "Nome offerta\nVALUE" or "Nome offerta VALUE"
-        const getLabelValue = (label) => {
-            const re = new RegExp(label + '[:\\s]+([^\\n\\r]+)', 'i');
-            const m  = cardText.match(re);
-            return m ? clean(m[1].split('\n')[0].split('Quota')[0].split('Prezzo')[0]) : null;
-        };
+        const parsed = parseCardText(lines);
 
-        const nomeOfferta    = getLabelValue('Nome offerta');
-        const prezzoRaw      = getLabelValue('Prezzo Luce') || getLabelValue('Prezzo Gas') || getLabelValue('Prezzo energia') || null;
-        const quotaFissaRaw  = getLabelValue('Quota fissa');
-        const tipologiaRaw   = getLabelValue('Prezzo');
+        // Skip if no meaningful price data
+        if (!parsed.prezzoMensileEur && !parsed.prezzoCommodity) return;
 
-        // Parse commodity price and unit (e.g. "0,122 €/kWh" → 0.122, "€/kWh")
-        let prezzoCommodity = null;
-        let unitaCommodity  = null;
-        if (prezzoRaw) {
-            const cpMatch = prezzoRaw.match(/([\d.,]+)\s*(€\/\w+)/i)
-                || prezzoRaw.match(/(PUN|PSV)\s*[+\-]\s*[\d.,]+\s*(€\/\w+)/i);
-            if (cpMatch) {
-                prezzoCommodity = clean(prezzoRaw);
-                unitaCommodity  = cpMatch[2] || null;
-            } else {
-                prezzoCommodity = clean(prezzoRaw);
-            }
-        }
+        // Sponsored filter
+        if (!includeSponsored && parsed.sponsorizzata) return;
 
-        // Internet/mobile: extract price differently (no kWh)
-        const eurmese = cardText.match(/([\d.,]+)\s*€\s*\/\s*mese/i);
-        if (!prezzoMensileEur && eurmese) {
-            // Handled below
-        }
+        seen.add(fornitore);
 
-        const quotaFissaEur = quotaFissaRaw ? parseEur(quotaFissaRaw) : null;
-
-        // Bonus text (after sparkles icon — look for patterns like "Fino a X€ di sconto")
-        const bonusMatch = cardText.match(/Fino a [^.!\n]+|Sconto [^.!\n]+|Cashback [^.!\n]+|Offerta esclusiva[^.!\n]*/i);
-        const bonus = bonusMatch ? clean(bonusMatch[0]) : null;
-
-        // Sponsored flag
-        const sponsorizzata = /Annuncio sponsorizzato/i.test(cardText);
-        if (!includeSponsored && sponsorizzata) return;
-
-        // Offer URL — "Scopri l'offerta" link
+        // Extract offer URL: find nearby CTA link
         let urlOfferta = null;
-        $card.find('a').each((_, a) => {
+        $card.find('a[href]').each((_, a) => {
             const href = $(a).attr('href') || '';
-            const text = $(a).text().trim();
-            if (/scopri|offerta|dettaglio|attiva/i.test(text) && href && href !== '#') {
-                urlOfferta = href.startsWith('http') ? href : 'https://tariffe.segugio.it' + href;
+            const txt  = $(a).text().trim();
+            if (/scopri|attiva|vai all/i.test(txt) && href && href !== '#' && href !== '') {
+                const full = href.startsWith('http') ? href : BASE + href;
+                if (!full.includes('funzionamento')) urlOfferta = full;
             }
         });
-
-        // Dedup key
-        const key = `${fornitore}||${nomeOfferta}||${categoria}`;
-        if (seen.has(key) || !fornitore) return;
-        seen.add(key);
-
-        // Skip cards with no meaningful data
-        if (!nomeOfferta && !prezzoMensile && !prezzoCommodity) return;
 
         offers.push({
             categoria,
             fornitore,
-            nomeOfferta,
-            prezzoMensile,
-            prezzoMensileEur,
-            prezzoCommodity,
-            unitaCommodity,
-            quotaFissa: quotaFissaRaw || null,
-            quotaFissaEur,
-            tipologiaPrezzo: tipologiaRaw || null,
-            durataContratto: null,   // parsed from tipologiaPrezzo downstream if needed
-            bonus,
-            sponsorizzata,
+            nomeOfferta:      parsed.nomeOfferta,
+            prezzoMensile:    parsed.prezzoMensile,
+            prezzoMensileEur: parsed.prezzoMensileEur,
+            prezzoCommodity:  parsed.prezzoCommodity,
+            unitaCommodity:   parsed.unitaCommodity,
+            quotaFissa:       parsed.quotaFissa,
+            quotaFissaEur:    parsed.quotaFissaEur,
+            tipologiaPrezzo:  parsed.tipologiaPrezzo,
+            durataContratto:  parsed.tipologiaPrezzo
+                ? (parsed.tipologiaPrezzo.match(/(\d+)\s*mesi/i)?.[1] ?? null)
+                : null,
+            bonus:            parsed.bonus,
+            esclusiva:        parsed.esclusiva,
+            sponsorizzata:    parsed.sponsorizzata,
             urlOfferta,
-            logoFornitore: logoUrl,
-            fonte: sourceUrl,
-            scrapedAt: new Date().toISOString(),
+            logoFornitore:    logoUrl,
+            fonte:            sourceUrl,
+            scrapedAt:        new Date().toISOString(),
         });
     });
 
@@ -226,55 +285,65 @@ const {
 
 let proxyConfiguration;
 if (proxyConfigInput?.useApifyProxy !== false) {
-    proxyConfiguration = await Actor.createProxyConfiguration(proxyConfigInput ?? { useApifyProxy: true });
+    proxyConfiguration = await Actor.createProxyConfiguration(proxyConfigInput ?? {
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+    });
 }
 
-// Build seed requests
 const seedRequests = [];
 for (const cat of categories) {
     const def = CATEGORY_URLS[cat];
     if (!def) { log.warning(`Unknown category: ${cat}`); continue; }
     for (const url of def.urls) {
-        seedRequests.push({ url, userData: { categoria: cat, label: def.label } });
+        seedRequests.push({
+            url,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'it-IT,it;q=0.9',
+                'Referer': 'https://www.segugio.it/',
+            },
+            userData: { categoria: cat },
+        });
     }
 }
 
-log.info(`Scraping ${seedRequests.length} pages across ${categories.length} categories`);
+log.info(`Scraping ${seedRequests.length} pages for categories: [${categories.join(', ')}]`);
 
-const dataset = await Dataset.open();
+const dataset    = await Dataset.open();
 const seenGlobal = new Set();
-let savedCount = 0;
-const limit = maxItems > 0 ? maxItems * categories.length : Infinity;
+let savedCount   = 0;
+const limit      = maxItems > 0 ? maxItems * categories.length : Infinity;
 
 const crawler = new CheerioCrawler({
     proxyConfiguration,
-    maxConcurrency: 5,
-    maxRequestsPerMinute: 60,
-    requestHandlerTimeoutSecs: 30,
+    maxConcurrency: 3,
+    maxRequestsPerMinute: 30,
+    requestHandlerTimeoutSecs: 45,
+    ignoreSslErrors: true,
 
     async requestHandler({ $, request }) {
         const { categoria } = request.userData;
-        const sourceUrl = request.url;
-
-        const offers = extractOffers($, sourceUrl, categoria, includeSponsored);
-        log.info(`[${categoria}] ${sourceUrl} → ${offers.length} offers found`);
+        const offers = extractOffers($, request.url, categoria, includeSponsored);
+        log.info(`[${categoria}] ${request.url} → ${offers.length} offers`);
 
         for (const offer of offers) {
             if (savedCount >= limit) break;
-            const key = `${offer.fornitore}||${offer.nomeOfferta}||${offer.categoria}`;
+            const key = `${offer.fornitore}||${offer.nomeOfferta}||${categoria}`;
             if (seenGlobal.has(key)) continue;
             seenGlobal.add(key);
             await dataset.pushData(offer);
             savedCount++;
+            log.debug(`Saved [${savedCount}]: ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
         }
     },
 
-    failedRequestHandler({ request }) {
-        log.warning(`Failed: ${request.url}`);
+    failedRequestHandler({ request, error }) {
+        log.warning(`Failed [${request.userData.categoria}]: ${request.url} — ${error.message}`);
     },
 });
 
 await crawler.run(seedRequests);
-
 log.info(`Done. Total offers saved: ${savedCount}`);
 await Actor.exit();
