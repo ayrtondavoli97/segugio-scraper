@@ -1,12 +1,17 @@
 /**
- * Segugio.it Scraper v1.4.0
+ * Segugio.it Scraper v1.5.0
  *
- * Uses PlaywrightCrawler (headless Chrome) because Segugio.it renders
- * offers client-side via JavaScript/React — CheerioCrawler gets empty HTML.
+ * Uses Playwright directly (no Crawlee crawler wrapper) to bypass
+ * Crawlee's _throwOnBlockedRequest which intercepts 403 before the
+ * browser can even load the page.
+ *
+ * Segugio.it returns 403 on the initial HTTP request but the browser
+ * (with proper headers/cookies) loads fine via JS navigation.
  */
 
 import { Actor, log } from 'apify';
-import { PlaywrightCrawler, Dataset } from 'crawlee';
+import { Dataset } from 'crawlee';
+import { chromium } from 'playwright';
 
 const BASE = 'https://tariffe.segugio.it';
 
@@ -69,32 +74,40 @@ function parseCardLines(lines) {
     return r;
 }
 
-/**
- * Extract offers from a rendered Segugio.it page using Playwright's page object.
- * Waits for offers to be loaded (img[title^="Logo di "] to appear).
- */
-async function extractOffersFromPage(page, sourceUrl, categoria, includeSponsored) {
-    // Wait for at least one offer logo to appear (confirms JS has rendered)
+async function scrapePage(page, url, categoria, includeSponsored) {
+    log.info(`[${categoria}] Navigating: ${url}`);
+
+    // Navigate ignoring HTTP errors — Playwright continues even on 403
+    const response = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+    });
+
+    const status = response?.status();
+    log.info(`[${categoria}] HTTP ${status}`);
+
+    // Wait for React to render offer cards
     try {
-        await page.waitForSelector('img[title^="Logo di "]', { timeout: 15000 });
+        await page.waitForSelector('img[title^="Logo di "]', { timeout: 20000 });
+        log.info(`[${categoria}] Offers rendered`);
     } catch {
-        log.warning(`[${categoria}] Offers did not render within 15s on ${sourceUrl}`);
-        return [];
+        // Try scrolling to trigger lazy loading
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(3000);
+        const count = await page.locator('img[title^="Logo di "]').count();
+        if (count === 0) {
+            log.warning(`[${categoria}] No offers found after scroll on ${url}`);
+            return [];
+        }
     }
 
-    // Extract data from DOM using page.evaluate
+    // Extract from DOM
     const rawOffers = await page.evaluate(() => {
-        const offers = [];
-        const seen   = new Set();
-
+        const offers = [], seen = new Set();
         document.querySelectorAll('img[title^="Logo di "]').forEach(logoEl => {
             const title     = logoEl.getAttribute('title') || '';
             const fornitore = title.replace(/^Logo di\s+/i, '').trim();
-            const logoUrl   = logoEl.getAttribute('src') || null;
-
             if (!fornitore || seen.has(fornitore)) return;
-
-            // Walk up to find containing card
             let card = logoEl.parentElement;
             for (let i = 0; i < 8; i++) {
                 const t = card?.textContent || '';
@@ -102,59 +115,36 @@ async function extractOffersFromPage(page, sourceUrl, categoria, includeSponsore
                 card = card?.parentElement;
             }
             if (!card) return;
-
-            // Extract CTA link
             let urlOfferta = null;
             card.querySelectorAll('a[href]').forEach(a => {
                 const href = a.getAttribute('href') || '';
-                const txt  = a.textContent.trim();
-                if (/scopri|attiva|vai/i.test(txt) && href && href !== '#' && !href.includes('funzionamento')) {
+                if (/scopri|attiva/i.test(a.textContent) && href && href !== '#' && !href.includes('funzionamento'))
                     urlOfferta = href.startsWith('http') ? href : 'https://tariffe.segugio.it' + href;
-                }
             });
-
-            // Get all text lines
-            const lines = (card.textContent || '')
-                .split(/\n/)
-                .map(l => l.trim())
-                .filter(Boolean);
-
+            const lines = (card.textContent || '').split(/\n/).map(l => l.trim()).filter(Boolean);
             seen.add(fornitore);
-            offers.push({ fornitore, logoUrl, urlOfferta, lines });
+            offers.push({ fornitore, logoUrl: logoEl.getAttribute('src'), urlOfferta, lines });
         });
-
         return offers;
     });
 
-    // Parse each raw offer
     const offers = [];
     for (const raw of rawOffers) {
         const p = parseCardLines(raw.lines);
         if (!p.prezzoMensileEur && !p.prezzoCommodity) continue;
         if (!includeSponsored && p.sponsorizzata) continue;
-
         offers.push({
-            categoria,
-            fornitore:        raw.fornitore,
-            nomeOfferta:      p.nomeOfferta,
-            prezzoMensile:    p.prezzoMensile,
-            prezzoMensileEur: p.prezzoMensileEur,
-            prezzoCommodity:  p.prezzoCommodity,
-            unitaCommodity:   p.unitaCommodity,
-            quotaFissa:       p.quotaFissa,
-            quotaFissaEur:    p.quotaFissaEur,
-            tipologiaPrezzo:  p.tipologiaPrezzo,
-            durataContratto:  p.tipologiaPrezzo?.match(/(\d+)\s*mesi/i)?.[1] ?? null,
-            bonus:            p.bonus,
-            esclusiva:        p.esclusiva,
-            sponsorizzata:    p.sponsorizzata,
-            urlOfferta:       raw.urlOfferta,
-            logoFornitore:    raw.logoUrl,
-            fonte:            sourceUrl,
-            scrapedAt:        new Date().toISOString(),
+            categoria, fornitore: raw.fornitore,
+            nomeOfferta: p.nomeOfferta, prezzoMensile: p.prezzoMensile,
+            prezzoMensileEur: p.prezzoMensileEur, prezzoCommodity: p.prezzoCommodity,
+            unitaCommodity: p.unitaCommodity, quotaFissa: p.quotaFissa,
+            quotaFissaEur: p.quotaFissaEur, tipologiaPrezzo: p.tipologiaPrezzo,
+            durataContratto: p.tipologiaPrezzo?.match(/(\d+)\s*mesi/i)?.[1] ?? null,
+            bonus: p.bonus, esclusiva: p.esclusiva, sponsorizzata: p.sponsorizzata,
+            urlOfferta: raw.urlOfferta, logoFornitore: raw.logoUrl,
+            fonte: url, scrapedAt: new Date().toISOString(),
         });
     }
-
     return offers;
 }
 
@@ -170,80 +160,69 @@ const {
     proxyConfig: proxyConfigInput,
 } = input;
 
-let proxyConfiguration;
+// Build proxy URL if needed
+let proxyUrl = undefined;
 if (proxyConfigInput?.useApifyProxy !== false) {
-    proxyConfiguration = await Actor.createProxyConfiguration(
+    const proxyConfiguration = await Actor.createProxyConfiguration(
         proxyConfigInput ?? { useApifyProxy: true }
     );
+    proxyUrl = await proxyConfiguration.newUrl();
 }
 
-const seedRequests = [];
-for (const cat of categories) {
-    const def = CATEGORY_URLS[cat];
-    if (!def) continue;
-    for (const url of def.urls) {
-        seedRequests.push({ url, userData: { categoria: cat } });
-    }
-}
+// Launch browser directly via Playwright
+const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+});
 
-log.info(`Scraping ${seedRequests.length} pages: [${categories.join(', ')}]`);
+const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale: 'it-IT',
+    extraHTTPHeaders: { 'Accept-Language': 'it-IT,it;q=0.9' },
+    ...(proxyUrl ? { proxy: { server: proxyUrl } } : {}),
+});
+
+// Visit homepage first to get cookies/session
+const warmupPage = await context.newPage();
+await warmupPage.goto('https://www.segugio.it/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+log.info('Warmup page loaded — cookies acquired');
+await warmupPage.waitForTimeout(1500);
+await warmupPage.close();
 
 const dataset    = await Dataset.open();
 const seenGlobal = new Set();
 let savedCount   = 0;
 const limit      = maxItems > 0 ? maxItems * categories.length : Infinity;
 
-const crawler = new PlaywrightCrawler({
-    proxyConfiguration,
-    maxConcurrency: 2,
-    requestHandlerTimeoutSecs: 60,
-    launchContext: {
-        launchOptions: {
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        },
-    },
-    browserPoolOptions: {
-        useFingerprints: false,
-    },
+for (const cat of categories) {
+    const def = CATEGORY_URLS[cat];
+    if (!def) { log.warning(`Unknown category: ${cat}`); continue; }
 
-    async requestHandler({ page, request }) {
-        const { categoria } = request.userData;
-
-        // Set Italian locale + headers before navigation
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'it-IT,it;q=0.9',
-            'Referer': 'https://www.segugio.it/',
-        });
-
-        // Accept cookies if banner appears
+    for (const url of def.urls) {
+        const page = await context.newPage();
         try {
-            const cookieBtn = await page.waitForSelector(
-                'button:has-text("Accetta"), button:has-text("Accetto"), button:has-text("Accept")',
-                { timeout: 5000 }
-            );
-            if (cookieBtn) await cookieBtn.click();
-        } catch { /* no cookie banner */ }
+            const offers = await scrapePage(page, url, cat, includeSponsored);
+            log.info(`[${cat}] → ${offers.length} offers found`);
 
-        const offers = await extractOffersFromPage(page, request.url, categoria, includeSponsored);
-        log.info(`[${categoria}] ${request.url} → ${offers.length} offers`);
-
-        for (const offer of offers) {
-            if (savedCount >= limit) break;
-            const key = `${offer.fornitore}||${offer.nomeOfferta}||${categoria}`;
-            if (seenGlobal.has(key)) continue;
-            seenGlobal.add(key);
-            await dataset.pushData(offer);
-            savedCount++;
-            log.info(`  [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
+            for (const offer of offers) {
+                if (savedCount >= limit) break;
+                const key = `${offer.fornitore}||${offer.nomeOfferta}||${cat}`;
+                if (seenGlobal.has(key)) continue;
+                seenGlobal.add(key);
+                await dataset.pushData(offer);
+                savedCount++;
+                log.info(`  [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
+            }
+        } catch (e) {
+            log.error(`[${cat}] ${url}: ${e.message}`);
+        } finally {
+            await page.close();
         }
-    },
 
-    failedRequestHandler({ request, error }) {
-        log.warning(`Failed [${request.userData?.categoria}]: ${request.url} — ${error?.message}`);
-    },
-});
+        await new Promise(r => setTimeout(r, 2000));
+    }
+}
 
-await crawler.run(seedRequests);
+await browser.close();
 log.info(`Done. Total offers saved: ${savedCount}`);
 await Actor.exit();
