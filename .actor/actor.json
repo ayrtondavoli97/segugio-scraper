@@ -1,0 +1,69 @@
+{
+    "actorSpecification": 1,
+    "name": "segugio-scraper",
+    "title": "Segugio.it Scraper — Energy, Insurance & Telecom Offers Italy",
+    "description": "Scrape all offers from Segugio.it: electricity, gas, internet/fiber, mobile plans. Italy's #1 price comparison portal. Returns provider, offer name, price/kWh, monthly cost, fixed/variable type, contract duration, bonuses.",
+    "version": "1.0",
+    "buildTag": "latest",
+    "dockerfile": "../Dockerfile",
+    "input": "./input_schema.json",
+    "output": "./output_schema.json",
+    "defaultRunOptions": {
+        "timeoutSecs": 300,
+        "memoryMbytes": 1024
+    },
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "title": "Segugio.it Offers",
+            "views": {
+                "overview": {
+                    "title": "Offers",
+                    "transformation": {
+                        "fields": [
+                            "categoria",
+                            "fornitore",
+                            "nomeOfferta",
+                            "prezzoMensile",
+                            "prezzoMensileEur",
+                            "prezzoCommodity",
+                            "unitaCommodity",
+                            "quotaFissa",
+                            "quotaFissaEur",
+                            "tipologiaPrezzo",
+                            "durataContratto",
+                            "bonus",
+                            "sponsorizzata",
+                            "urlOfferta",
+                            "logoFornitore",
+                            "fonte",
+                            "scrapedAt"
+                        ]
+                    },
+                    "display": {
+                        "component": "table",
+                        "properties": {
+                            "categoria":        { "label": "Category",          "format": "text" },
+                            "fornitore":        { "label": "Provider",          "format": "text" },
+                            "nomeOfferta":      { "label": "Offer name",        "format": "text" },
+                            "prezzoMensile":    { "label": "Monthly cost",      "format": "text" },
+                            "prezzoMensileEur": { "label": "Monthly cost (€)",  "format": "number" },
+                            "prezzoCommodity":  { "label": "Unit price",        "format": "text" },
+                            "unitaCommodity":   { "label": "Unit",              "format": "text" },
+                            "quotaFissa":       { "label": "Fixed fee",         "format": "text" },
+                            "quotaFissaEur":    { "label": "Fixed fee (€)",     "format": "number" },
+                            "tipologiaPrezzo":  { "label": "Price type",        "format": "text" },
+                            "durataContratto":  { "label": "Contract duration", "format": "text" },
+                            "bonus":            { "label": "Bonuses",           "format": "text" },
+                            "sponsorizzata":    { "label": "Sponsored",         "format": "text" },
+                            "urlOfferta":       { "label": "Offer URL",         "format": "link" },
+                            "logoFornitore":    { "label": "Provider logo",     "format": "link" },
+                            "fonte":            { "label": "Source URL",        "format": "link" },
+                            "scrapedAt":        { "label": "Scraped at",        "format": "text" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

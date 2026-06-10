@@ -1,0 +1,39 @@
+{
+    "title": "Segugio.it Scraper",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "categories": {
+            "title": "Categories to scrape",
+            "type": "array",
+            "description": "Select which product categories to scrape. Leave empty to scrape all.",
+            "editor": "select",
+            "items": {
+                "type": "string",
+                "enum": ["luce", "gas", "luce-gas", "internet", "mobile"],
+                "enumTitles": ["Electricity (Luce)", "Gas", "Electricity + Gas (Dual Fuel)", "Internet / Fiber", "Mobile Plans"]
+            },
+            "default": ["luce", "gas", "internet", "mobile"]
+        },
+        "includeSponsored": {
+            "title": "Include sponsored offers",
+            "type": "boolean",
+            "description": "When enabled, includes offers marked as sponsored (annuncio sponsorizzato). These are paid placements and may not be the most competitive.",
+            "default": true
+        },
+        "maxItems": {
+            "title": "Max results per category",
+            "type": "integer",
+            "description": "Maximum number of offers to return per category. Set to 0 for all available offers.",
+            "default": 0,
+            "minimum": 0
+        },
+        "proxyConfig": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Proxy settings. Default Apify proxy recommended.",
+            "editor": "proxy",
+            "default": { "useApifyProxy": true }
+        }
+    }
+}

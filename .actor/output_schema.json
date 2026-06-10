@@ -1,0 +1,13 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "Segugio.it Offers Dataset",
+    "description": "Italian energy, internet and mobile offers from Segugio.it — Italy's #1 price comparison portal.",
+    "properties": {
+        "offers": {
+            "type": "string",
+            "title": "Offers",
+            "description": "Energy, internet and mobile offers scraped from Segugio.it.",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
+        }
+    }
+}
