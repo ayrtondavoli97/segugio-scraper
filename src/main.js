@@ -1,17 +1,21 @@
-/**
- * Italy Luce & Gas Offers Scraper
- *
- * Scrapes public electricity and gas offer pages from tariffe.segugio.it.
- * The extraction is intentionally defensive: Segugio markup can change, so the
- * actor combines semantic selectors, text heuristics and optional debug output.
- */
-
 import { Actor } from 'apify';
 import { PlaywrightCrawler, Dataset, log } from 'crawlee';
 
-const BASE_URL = 'https://tariffe.segugio.it';
-
-const CATEGORY_CONFIG = {
-    luce: {
-        label: 'luce',
-        urls: [
+const BASE = 'https://tariffe.segugio.it';
+const CATS = {
+  luce: [
+    `${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`,
+  ],
+  gas: [
+    `${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`,
+    `${BASE}/costo-gas-metano/lista-offerte-gas.aspx`,
+    `${BASE}/costo-gas/lista-offerte-gas.aspx`,
+  ],
+  'luce-gas': [
+    `${BASE}/costo-luce-gas/lista-offerte-luce-gas.aspx`,
+    `${BASE}/costo-energia-elettrica-gas/lista-offerte-luce-gas.aspx`,
+  ],
+};
+const DEFAULT_INPUT = {
+  categories: ['luce', 'gas'],
+  maxItems: 50
