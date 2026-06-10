@@ -1,13 +1,1 @@
-import { Actor } from 'apify';
-import { PlaywrightCrawler, Dataset, log } from 'crawlee';
-
-const BASE = 'https://tariffe.segugio.it';
-const URLS = {
-  luce: [`${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`],
-  gas: [
-    `${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`,
-    `${BASE}/costo-gas-metano/lista-offerte-gas.aspx`,
-    `${BASE}/costo-gas/lista-offerte-gas.aspx`,
-  ],
-  'luce-gas': [
-    `${BASE}/costo-luce
+import {Actor} from'apify';import{PlaywrightCrawler,Dataset,log}from'crawlee';const B='https://tariffe.segugio.it';const U={luce:[B+'/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx'],gas:[B+'/costo-gas-metano/lista-offerte-gas-metano.aspx',B+'/costo-gas-metano/lista-offerte-gas.aspx'],dual:[B+'/costo-luce-gas/lista-offerte-luce-gas.aspx']};await Actor.init();const i=await Actor.getInput()||{};const cats=i.categories||['luce','gas'];const max=i.maxItems||50;let n=0;const req=[];for(const c of cats)for
