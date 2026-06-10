@@ -1,24 +1,8 @@
 /**
- * Segugio.it Scraper v1.1.0
+ * Segugio.it Scraper v1.3.0
  *
- * Scrapes offers from Segugio.it:
- *   - Electricity (luce)
- *   - Gas
- *   - Dual fuel (luce+gas)
- *   - Internet/fiber
- *   - Mobile
- *
- * HTML structure confirmed from live pages.
- * Each card is separated by <hr> and rendered TWICE (desktop+mobile).
- * We use the FIRST instance only (more complete data).
- *
- * Card structure (within each block between <hr> tags):
- *   img[title^="Logo di "]  → fornitore name + logo URL
- *   "XX,XX €\nal mese"     → prezzoMensile
- *   Lines: "Nome offerta\nVALUE", "Prezzo Luce\nVALUE", "Quota fissa\nVALUE", "Prezzo\nVALUE"
- *   img[src*="sparkles"] sibling text → bonus
- *   "*Annuncio sponsorizzato" → sponsorizzata
- *   a[href] containing "scopri" or known CTA patterns → urlOfferta
+ * Uses CheerioCrawler with session pool disabled and custom headers
+ * to bypass Segugio.it's WAF bot detection.
  */
 
 import { Actor, log } from 'apify';
@@ -26,43 +10,26 @@ import { CheerioCrawler, Dataset } from 'crawlee';
 
 const BASE = 'https://tariffe.segugio.it';
 
-// Only use main listing pages — sub-pages (prezzo-fisso etc.) get 403
 const CATEGORY_URLS = {
-    luce: {
-        label: 'Electricity',
-        commodity: 'luce',
-        urls: [
-            `${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`,
-        ],
-    },
-    gas: {
-        label: 'Gas',
-        commodity: 'gas',
-        urls: [
-            `${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`,
-        ],
-    },
-    'luce-gas': {
-        label: 'Electricity + Gas',
-        commodity: 'dual',
-        urls: [
-            `${BASE}/migliori-tariffe/migliori-tariffe-luce-gas.aspx`,
-        ],
-    },
-    internet: {
-        label: 'Internet / Fiber',
-        commodity: 'internet',
-        urls: [
-            `${BASE}/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx`,
-        ],
-    },
-    mobile: {
-        label: 'Mobile',
-        commodity: 'mobile',
-        urls: [
-            `${BASE}/tariffe-cellulari/`,
-        ],
-    },
+    luce:       { label: 'Electricity',      urls: [`${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`] },
+    gas:        { label: 'Gas',              urls: [`${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`] },
+    'luce-gas': { label: 'Electricity + Gas',urls: [`${BASE}/migliori-tariffe/migliori-tariffe-luce-gas.aspx`] },
+    internet:   { label: 'Internet/Fiber',   urls: [`${BASE}/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx`] },
+    mobile:     { label: 'Mobile',           urls: [`${BASE}/tariffe-cellulari/`] },
+};
+
+const CUSTOM_HEADERS = {
+    'User-Agent':                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language':           'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding':           'gzip, deflate, br',
+    'Referer':                   'https://www.segugio.it/',
+    'Sec-Fetch-Dest':            'document',
+    'Sec-Fetch-Mode':            'navigate',
+    'Sec-Fetch-Site':            'same-site',
+    'Sec-Fetch-User':            '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'Cache-Control':             'max-age=0',
 };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -72,262 +39,140 @@ function parseEur(raw) {
     const n = parseFloat(raw.replace(/[€\s]/g, '').replace(/\./g, '').replace(',', '.'));
     return isNaN(n) ? null : Math.round(n * 100) / 100;
 }
+function clean(s) { return (s || '').replace(/\s+/g, ' ').trim() || null; }
 
-function clean(s) {
-    return (s || '').replace(/\s+/g, ' ').trim() || null;
-}
+const KNOWN_LABELS = new Set([
+    'Nome offerta','Prezzo Luce','Prezzo Gas','Prezzo energia',
+    'Quota fissa','Prezzo','Velocità','Tecnologia','GB inclusi','Minuti','SMS',
+]);
 
-/**
- * Parse a block of text (one offer card) into structured fields.
- *
- * The card text has this line structure (newline-separated):
- *   ...
- *   Nome offerta
- *   Web Luce
- *   Prezzo Luce        (or "Prezzo Gas" for gas cards)
- *   0,122 €/kWh
- *   Quota fissa
- *   7,50 €/mese
- *   Prezzo
- *   Fisso 12 mesi
- *   ...
- *   sparkles (icon text or preceding text)
- *   Bonus description
- *   ...
- */
-function parseCardText(lines) {
-    const KNOWN_LABELS = new Set([
-        'Nome offerta', 'Prezzo Luce', 'Prezzo Gas', 'Prezzo energia',
-        'Quota fissa', 'Prezzo', 'Velocità', 'Tecnologia', 'GB inclusi',
-        'Minuti', 'SMS',
-    ]);
-
-    const result = {
-        nomeOfferta: null,
-        prezzoCommodity: null,
-        unitaCommodity: null,
-        quotaFissa: null,
-        quotaFissaEur: null,
-        tipologiaPrezzo: null,
-        prezzoMensile: null,
-        prezzoMensileEur: null,
-        bonus: null,
-        sponsorizzata: false,
-        esclusiva: false,
+function parseCardLines(lines) {
+    const r = {
+        nomeOfferta: null, prezzoCommodity: null, unitaCommodity: null,
+        quotaFissa: null, quotaFissaEur: null, tipologiaPrezzo: null,
+        prezzoMensile: null, prezzoMensileEur: null,
+        bonus: null, sponsorizzata: false, esclusiva: false,
     };
-
-    // Monthly price: "XX,XX €" followed by "al mese" on next line or same
     for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
-
-        // Monthly price
-        if (/^\d[\d.,]* €$/.test(l) && i + 1 < lines.length && lines[i+1] === 'al mese') {
-            result.prezzoMensile = `${l} al mese`;
-            result.prezzoMensileEur = parseEur(l);
+        if (/^\d[\d.,]* €$/.test(l) && lines[i+1] === 'al mese') {
+            r.prezzoMensile    = `${l} al mese`;
+            r.prezzoMensileEur = parseEur(l);
         }
-
-        // Sponsored
-        if (/Annuncio sponsorizzato/i.test(l)) result.sponsorizzata = true;
-        if (/Offerta esclusiva/i.test(l)) result.esclusiva = true;
-
-        // Label/value pairs
-        if (KNOWN_LABELS.has(l) && i + 1 < lines.length) {
-            const val = lines[i + 1];
+        if (/Annuncio sponsorizzato/i.test(l)) r.sponsorizzata = true;
+        if (/Offerta esclusiva/i.test(l))      r.esclusiva     = true;
+        if (KNOWN_LABELS.has(l) && i+1 < lines.length) {
+            const val = lines[i+1];
             if (val && !KNOWN_LABELS.has(val) && val !== 'al mese' && val !== 'Altri dettagli') {
-                switch (l) {
-                    case 'Nome offerta':
-                        result.nomeOfferta = clean(val);
-                        break;
-                    case 'Prezzo Luce':
-                    case 'Prezzo Gas':
-                    case 'Prezzo energia': {
-                        result.prezzoCommodity = clean(val);
-                        const unitMatch = val.match(/€\/(\w+)/);
-                        result.unitaCommodity = unitMatch ? `€/${unitMatch[1]}` : null;
-                        break;
-                    }
-                    case 'Quota fissa':
-                        result.quotaFissa = clean(val);
-                        result.quotaFissaEur = parseEur(val);
-                        break;
-                    case 'Prezzo':
-                        // Only take clean price type values, not commodity prices
-                        if (!/€\//.test(val) && !/\d,\d/.test(val)) {
-                            result.tipologiaPrezzo = clean(val);
-                        }
-                        break;
+                if (l === 'Nome offerta')  r.nomeOfferta = clean(val);
+                if (['Prezzo Luce','Prezzo Gas','Prezzo energia'].includes(l)) {
+                    r.prezzoCommodity = clean(val);
+                    const um = val.match(/€\/(\w+)/);
+                    r.unitaCommodity  = um ? `€/${um[1]}` : null;
                 }
+                if (l === 'Quota fissa') { r.quotaFissa = clean(val); r.quotaFissaEur = parseEur(val); }
+                if (l === 'Prezzo' && !/€\//.test(val) && !/^\d,\d/.test(val)) r.tipologiaPrezzo = clean(val);
             }
         }
     }
-
-    // Bonus: text after "sparkles" icon line or matching bonus patterns
-    const bonusPatterns = [
-        /^(Fino a .+)/i,
-        /^(Sconto .+)/i,
-        /^(Cashback .+)/i,
-        /^(\d+€.+sconto.+)/i,
-        /^(La nuova .+)/i,
-        /^(\d+€\/mese .+)/i,
-    ];
+    const bonusRx = [/^(Fino a .+)/i,/^(Sconto .+)/i,/^(Cashback .+)/i,/^(\d+€.+sconto.+)/i,/^(La nuova .+)/i,/^(\d+€\/mese .+)/i];
     for (const line of lines) {
-        for (const pat of bonusPatterns) {
-            const m = line.match(pat);
-            if (m) { result.bonus = clean(m[1]); break; }
-        }
-        if (result.bonus) break;
+        for (const rx of bonusRx) { const m = line.match(rx); if (m) { r.bonus = clean(m[1]); break; } }
+        if (r.bonus) break;
     }
-
-    return result;
+    return r;
 }
 
-/**
- * Extract all offers from a Segugio.it listing page using Cheerio.
- *
- * Key insight: each offer is between two <hr> elements.
- * The first img with title="Logo di NOME" gives the provider.
- * We skip the second (mobile) copy by deduplicating on fornitore+nome.
- */
 function extractOffers($, sourceUrl, categoria, includeSponsored) {
-    const offers = [];
-    const seen = new Set();
-
-    // Strategy: find all images whose title starts with "Logo di "
-    // These mark the start of each offer card
-    $('img[title^="Logo di "]').each((_, logoEl) => {
-        const $logo = $(logoEl);
-        const title = $logo.attr('title') || '';
-        const fornitore = clean(title.replace(/^Logo di\s+/i, ''));
-        const logoUrl   = $logo.attr('src') || null;
-
-        if (!fornitore) return;
-
-        // Walk up to find the containing card block
-        // Segugio wraps each in a div; we go up until we find something
-        // that contains "al mese" (indicates it's a complete card)
-        let $card = $logo.parent();
-        for (let i = 0; i < 8; i++) {
-            if ($card.text().includes('al mese') || $card.text().includes('Nome offerta')) break;
+    const offers = [], seen = new Set();
+    $('img[title^="Logo di "]').each((_, el) => {
+        const $l = $(el);
+        const fornitore = clean(($l.attr('title')||'').replace(/^Logo di\s+/i,''));
+        if (!fornitore || seen.has(fornitore)) return;
+        let $card = $l.parent();
+        for (let i=0; i<8; i++) {
+            if ($card.text().includes('al mese')||$card.text().includes('Nome offerta')) break;
             $card = $card.parent();
         }
-
-        const rawText = $card.text();
-
-        // Dedup: skip if we've already seen this fornitore on this page
-        // (avoids desktop+mobile duplicate)
-        if (seen.has(fornitore)) return;
-
-        // Parse the card text line by line
-        const lines = rawText
-            .split(/\n/)
-            .map(l => l.trim())
-            .filter(l => l && l !== '\n');
-
-        const parsed = parseCardText(lines);
-
-        // Skip if no meaningful price data
-        if (!parsed.prezzoMensileEur && !parsed.prezzoCommodity) return;
-
-        // Sponsored filter
-        if (!includeSponsored && parsed.sponsorizzata) return;
-
+        const lines = $card.text().split(/\n/).map(l=>l.trim()).filter(Boolean);
+        const p = parseCardLines(lines);
+        if (!p.prezzoMensileEur && !p.prezzoCommodity) return;
+        if (!includeSponsored && p.sponsorizzata) return;
         seen.add(fornitore);
-
-        // Extract offer URL: find nearby CTA link
         let urlOfferta = null;
-        $card.find('a[href]').each((_, a) => {
-            const href = $(a).attr('href') || '';
-            const txt  = $(a).text().trim();
-            if (/scopri|attiva|vai all/i.test(txt) && href && href !== '#' && href !== '') {
-                const full = href.startsWith('http') ? href : BASE + href;
-                if (!full.includes('funzionamento')) urlOfferta = full;
-            }
+        $card.find('a[href]').each((_,a) => {
+            const href=$(a).attr('href')||'', txt=$(a).text().trim();
+            if (/scopri|attiva|vai/i.test(txt)&&href&&href!=='#'&&!href.includes('funzionamento'))
+                urlOfferta = href.startsWith('http')?href:BASE+href;
         });
-
         offers.push({
-            categoria,
-            fornitore,
-            nomeOfferta:      parsed.nomeOfferta,
-            prezzoMensile:    parsed.prezzoMensile,
-            prezzoMensileEur: parsed.prezzoMensileEur,
-            prezzoCommodity:  parsed.prezzoCommodity,
-            unitaCommodity:   parsed.unitaCommodity,
-            quotaFissa:       parsed.quotaFissa,
-            quotaFissaEur:    parsed.quotaFissaEur,
-            tipologiaPrezzo:  parsed.tipologiaPrezzo,
-            durataContratto:  parsed.tipologiaPrezzo
-                ? (parsed.tipologiaPrezzo.match(/(\d+)\s*mesi/i)?.[1] ?? null)
-                : null,
-            bonus:            parsed.bonus,
-            esclusiva:        parsed.esclusiva,
-            sponsorizzata:    parsed.sponsorizzata,
-            urlOfferta,
-            logoFornitore:    logoUrl,
-            fonte:            sourceUrl,
-            scrapedAt:        new Date().toISOString(),
+            categoria, fornitore,
+            nomeOfferta: p.nomeOfferta, prezzoMensile: p.prezzoMensile,
+            prezzoMensileEur: p.prezzoMensileEur, prezzoCommodity: p.prezzoCommodity,
+            unitaCommodity: p.unitaCommodity, quotaFissa: p.quotaFissa,
+            quotaFissaEur: p.quotaFissaEur, tipologiaPrezzo: p.tipologiaPrezzo,
+            durataContratto: p.tipologiaPrezzo?.match(/(\d+)\s*mesi/i)?.[1] ?? null,
+            bonus: p.bonus, esclusiva: p.esclusiva, sponsorizzata: p.sponsorizzata,
+            urlOfferta, logoFornitore: $l.attr('src')||null,
+            fonte: sourceUrl, scrapedAt: new Date().toISOString(),
         });
     });
-
     return offers;
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 await Actor.init();
-
 const input = (await Actor.getInput()) ?? {};
 const {
-    categories       = ['luce', 'gas', 'internet', 'mobile'],
+    categories = ['luce','gas','internet','mobile'],
     includeSponsored = true,
-    maxItems         = 0,
+    maxItems = 0,
     proxyConfig: proxyConfigInput,
 } = input;
 
 let proxyConfiguration;
 if (proxyConfigInput?.useApifyProxy !== false) {
-    proxyConfiguration = await Actor.createProxyConfiguration(proxyConfigInput ?? {
-        useApifyProxy: true,
-        apifyProxyGroups: ['RESIDENTIAL'],
-    });
+    proxyConfiguration = await Actor.createProxyConfiguration(
+        proxyConfigInput ?? { useApifyProxy: true }
+    );
 }
 
 const seedRequests = [];
 for (const cat of categories) {
     const def = CATEGORY_URLS[cat];
-    if (!def) { log.warning(`Unknown category: ${cat}`); continue; }
+    if (!def) continue;
     for (const url of def.urls) {
-        seedRequests.push({
-            url,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'it-IT,it;q=0.9',
-                'Referer': 'https://www.segugio.it/',
-            },
-            userData: { categoria: cat },
-        });
+        seedRequests.push({ url, headers: CUSTOM_HEADERS, userData: { categoria: cat } });
     }
 }
 
-log.info(`Scraping ${seedRequests.length} pages for categories: [${categories.join(', ')}]`);
+log.info(`Scraping ${seedRequests.length} pages: [${categories.join(', ')}]`);
 
-const dataset    = await Dataset.open();
+const dataset = await Dataset.open();
 const seenGlobal = new Set();
-let savedCount   = 0;
-const limit      = maxItems > 0 ? maxItems * categories.length : Infinity;
+let savedCount = 0;
+const limit = maxItems > 0 ? maxItems * categories.length : Infinity;
 
 const crawler = new CheerioCrawler({
     proxyConfiguration,
-    maxConcurrency: 3,
-    maxRequestsPerMinute: 30,
+    maxConcurrency: 2,
+    maxRequestsPerMinute: 15,
     requestHandlerTimeoutSecs: 45,
-    ignoreSslErrors: true,
+    // Disable Crawlee's automatic fingerprinting that triggers WAF
+    useSessionPool: false,
+    persistCookiesPerSession: false,
+    headerGeneratorOptions: {
+        browsers: [],
+        devices: [],
+        locales: [],
+        operatingSystems: [],
+    },
 
     async requestHandler({ $, request }) {
         const { categoria } = request.userData;
         const offers = extractOffers($, request.url, categoria, includeSponsored);
         log.info(`[${categoria}] ${request.url} → ${offers.length} offers`);
-
         for (const offer of offers) {
             if (savedCount >= limit) break;
             const key = `${offer.fornitore}||${offer.nomeOfferta}||${categoria}`;
@@ -335,12 +180,12 @@ const crawler = new CheerioCrawler({
             seenGlobal.add(key);
             await dataset.pushData(offer);
             savedCount++;
-            log.debug(`Saved [${savedCount}]: ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
+            log.info(`  [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
         }
     },
 
     failedRequestHandler({ request, error }) {
-        log.warning(`Failed [${request.userData.categoria}]: ${request.url} — ${error.message}`);
+        log.warning(`Failed [${request.userData?.categoria}]: ${request.url} — ${error?.message}`);
     },
 });
 
