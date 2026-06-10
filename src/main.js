@@ -1,13 +1,1 @@
-import { Actor } from 'apify';
-import { PlaywrightCrawler, log } from 'crawlee';
-
-const BASE = 'https://tariffe.segugio.it';
-const URLS = {
-    luce: `${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`,
-    gas: `${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`,
-};
-
-function toNumber(value) {
-    if (!value) return null;
-    const m = String(value).replace(/\s/g, '').match(/\d+(?:[.,]\d+)?/);
-    return m ? Number(m[0].replace
+import{Actor as A}from'apify';await A.init();let b='https://tariffe.segugio.it',U={luce:b+'/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx',gas:b+'/costo-gas-metano/lista-offerte-gas-metano.aspx'},i=await A.getInput()||{};for(let c of i.categories||['luce','gas']){let u=U[c],h=await(await fetch(u)).text(),t=h.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ');await A.pushData({category:c,url:u,textSample:t.slice(0,2000),scrapedAt:new Date().toISOString()})}await A.exit();
