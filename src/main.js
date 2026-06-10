@@ -14,3 +14,4 @@ const BASE = 'https://tariffe.segugio.it';
 const CATEGORY_URLS = {
     luce: {
         label: 'Electricity',
+        commodity
