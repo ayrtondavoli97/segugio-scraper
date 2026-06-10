@@ -1,33 +1,26 @@
 /**
- * Italian Energy & Telecom Offers Scraper v2.0.0
+ * Italy Energy & Telecom Offers Scraper v2.1.0
  *
- * Target: SOStariffe.it (Italy's #2 price comparison portal)
- * Reason: Segugio.it blocks ALL Apify IPs (403 on every proxy option).
- * SOStariffe.it is accessible with standard CheerioCrawler + Apify proxy.
+ * Target: segugio.it (primary) with SOStariffe.it as fallback structure reference.
  *
- * Categories:
- *   luce     → sostariffe.it/energia-elettrica/
- *   gas      → sostariffe.it/gas/
- *   luce-gas → sostariffe.it/energia-elettrica-gas/
- *   internet → sostariffe.it/internet-casa/
- *   mobile   → sostariffe.it/tariffe-cellulari/
+ * KEY FIX: blockedStatusCodes: [] in sessionPoolOptions
+ * This prevents Crawlee from intercepting the Cloudflare 403 challenge —
+ * the browser can then load the page and execute JS normally.
  *
- * HTML structure (confirmed from live fetch):
- *   Each offer card: [class*="offer"] or [class*="tariffa"] or article
- *   Provider logo: img with data or src containing provider slug
- *   Price: element containing "€" + "/mese" or "/kWh"
+ * + waitForTimeout(5000) after navigation to let Cloudflare challenge complete.
+ * + RESIDENTIAL proxy (required for Cloudflare bypass).
  */
 
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
+import { PlaywrightCrawler, Dataset } from 'crawlee';
 
-const BASE = 'https://www.sostariffe.it';
+const BASE = 'https://tariffe.segugio.it';
 
 const CATEGORY_URLS = {
-    luce:       { label: 'Electricity', urls: [`${BASE}/energia-elettrica/`] },
-    gas:        { label: 'Gas',         urls: [`${BASE}/gas/`] },
-    'luce-gas': { label: 'Electricity + Gas', urls: [`${BASE}/energia-elettrica-gas/`] },
-    internet:   { label: 'Internet/Fiber',    urls: [`${BASE}/internet-casa/`] },
+    luce:       { label: 'Electricity', urls: [`${BASE}/costo-energia-elettrica/lista-offerte-energia-elettrica.aspx`] },
+    gas:        { label: 'Gas',         urls: [`${BASE}/costo-gas-metano/lista-offerte-gas-metano.aspx`] },
+    'luce-gas': { label: 'Electricity + Gas', urls: [`${BASE}/migliori-tariffe/migliori-tariffe-luce-gas.aspx`] },
+    internet:   { label: 'Internet/Fiber',    urls: [`${BASE}/tariffe-adsl-internet/lista-offerte-adsl-internet.aspx`] },
     mobile:     { label: 'Mobile',            urls: [`${BASE}/tariffe-cellulari/`] },
 };
 
@@ -38,118 +31,46 @@ function parseEur(raw) {
 }
 function clean(s) { return (s || '').replace(/\s+/g, ' ').trim() || null; }
 
-function extractOffers($, sourceUrl, categoria) {
-    const offers = [];
-    const seen   = new Set();
+const KNOWN_LABELS = new Set([
+    'Nome offerta', 'Prezzo Luce', 'Prezzo Gas', 'Prezzo energia',
+    'Quota fissa', 'Prezzo', 'Velocità', 'Tecnologia', 'GB inclusi', 'Minuti', 'SMS',
+]);
 
-    // SOStariffe uses JSON-LD or structured article/div cards
-    // Try multiple selector strategies
-    const cardSelectors = [
-        'article[class*="offer"]',
-        'div[class*="offer-card"]',
-        'div[class*="tariffa"]',
-        'div[class*="result"]',
-        '.offer-item',
-        '.tariff-card',
-        'article',
-    ];
-
-    let cards = $();
-    for (const sel of cardSelectors) {
-        cards = $(sel);
-        if (cards.length > 2) {
-            log.info(`  Selector "${sel}" → ${cards.length} cards`);
-            break;
+function parseCardLines(lines) {
+    const r = {
+        nomeOfferta: null, prezzoCommodity: null, unitaCommodity: null,
+        quotaFissa: null, quotaFissaEur: null, tipologiaPrezzo: null,
+        prezzoMensile: null, prezzoMensileEur: null,
+        bonus: null, sponsorizzata: false, esclusiva: false,
+    };
+    for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        if (/^\d[\d.,]* €$/.test(l) && lines[i + 1] === 'al mese') {
+            r.prezzoMensile    = `${l} al mese`;
+            r.prezzoMensileEur = parseEur(l);
+        }
+        if (/Annuncio sponsorizzato/i.test(l)) r.sponsorizzata = true;
+        if (/Offerta esclusiva/i.test(l))      r.esclusiva     = true;
+        if (KNOWN_LABELS.has(l) && i + 1 < lines.length) {
+            const val = lines[i + 1];
+            if (val && !KNOWN_LABELS.has(val) && val !== 'al mese' && val !== 'Altri dettagli') {
+                if (l === 'Nome offerta') r.nomeOfferta = clean(val);
+                if (['Prezzo Luce', 'Prezzo Gas', 'Prezzo energia'].includes(l)) {
+                    r.prezzoCommodity = clean(val);
+                    const um = val.match(/€\/(\w+)/);
+                    r.unitaCommodity  = um ? `€/${um[1]}` : null;
+                }
+                if (l === 'Quota fissa') { r.quotaFissa = clean(val); r.quotaFissaEur = parseEur(val); }
+                if (l === 'Prezzo' && !/€\//.test(val) && !/^\d,\d/.test(val)) r.tipologiaPrezzo = clean(val);
+            }
         }
     }
-
-    if (cards.length === 0) {
-        // Fallback: look for JSON-LD structured data
-        $('script[type="application/ld+json"]').each((_, el) => {
-            try {
-                const data = JSON.parse($(el).html() || '{}');
-                if (data['@type'] === 'ItemList' || Array.isArray(data.itemListElement)) {
-                    log.info(`  Found JSON-LD ItemList with ${(data.itemListElement || []).length} items`);
-                }
-            } catch {}
-        });
-
-        // Log first 2000 chars of page text for debugging
-        const txt = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 2000);
-        log.info(`  Body text preview:\n${txt}`);
-        return [];
+    const bonusRx = [/^(Fino a .+)/i, /^(Sconto .+)/i, /^(Cashback .+)/i, /^(\d+€.+sconto.+)/i, /^(La nuova .+)/i, /^(\d+€\/mese .+)/i];
+    for (const line of lines) {
+        for (const rx of bonusRx) { const m = line.match(rx); if (m) { r.bonus = clean(m[1]); break; } }
+        if (r.bonus) break;
     }
-
-    cards.each((_, card) => {
-        const $c = $(card);
-
-        // Provider: img alt or title, or heading text
-        const imgAlt   = $c.find('img').first().attr('alt') || '';
-        const imgTitle = $c.find('img').first().attr('title') || '';
-        const heading  = $c.find('h2, h3, h4, .provider-name, [class*="provider"], [class*="fornitore"]').first().text();
-        const fornitore = clean(imgAlt || imgTitle || heading) || null;
-
-        if (!fornitore || seen.has(fornitore)) return;
-
-        // Offer name
-        const nomeOfferta = clean($c.find('[class*="offer-name"], [class*="nome"], [class*="title"], h3, h4').first().text()) || null;
-
-        // Price per month
-        const priceText    = $c.text();
-        const monthlyMatch = priceText.match(/([\d.,]+)\s*€[^/]*\/\s*mese/i)
-            || priceText.match(/([\d.,]+)\s*€[^a-z]*al\s*mese/i);
-        const prezzoMensileEur = monthlyMatch ? parseEur(monthlyMatch[1]) : null;
-        const prezzoMensile    = monthlyMatch ? monthlyMatch[0].trim() : null;
-
-        // Commodity price
-        const kwhMatch  = priceText.match(/([\d.,]+)\s*€\s*\/\s*kWh/i)
-            || priceText.match(/(PUN\s*[+\-]\s*[\d.,]+)\s*€\s*\/\s*kWh/i);
-        const smcMatch  = priceText.match(/([\d.,]+)\s*€\s*\/\s*Smc/i);
-        const prezzoCommodity  = kwhMatch?.[0] || smcMatch?.[0] || null;
-        const unitaCommodity   = kwhMatch ? '€/kWh' : smcMatch ? '€/Smc' : null;
-
-        // Fixed fee
-        const fixedMatch   = priceText.match(/([\d.,]+)\s*€\s*\/?\s*mese[^s]/i);
-        const quotaFissa   = null; // requires deeper parse
-        const quotaFissaEur = null;
-
-        // Price type
-        const tipoMatch    = priceText.match(/[Ff]isso\s*\d*\s*mesi?|[Vv]ariabile|[Ii]ndicizzato|PUN/);
-        const tipologiaPrezzo = tipoMatch ? clean(tipoMatch[0]) : null;
-
-        // Bonus
-        const bonusMatch   = priceText.match(/[Ff]ino a .{5,50}€[^€]{0,20}sconto|[Ss]conto .{5,50}€|[Cc]ashback .{5,50}€/);
-        const bonus        = bonusMatch ? clean(bonusMatch[0]) : null;
-
-        // URL
-        const urlOfferta   = $c.find('a[href]').first().attr('href') || null;
-        const fullUrl      = urlOfferta
-            ? (urlOfferta.startsWith('http') ? urlOfferta : BASE + urlOfferta)
-            : null;
-
-        // Logo
-        const logoUrl      = $c.find('img').first().attr('src') || null;
-
-        if (!prezzoMensileEur && !prezzoCommodity) return;
-        seen.add(fornitore);
-
-        offers.push({
-            categoria, fornitore, nomeOfferta,
-            prezzoMensile, prezzoMensileEur,
-            prezzoCommodity, unitaCommodity,
-            quotaFissa, quotaFissaEur,
-            tipologiaPrezzo,
-            durataContratto: tipologiaPrezzo?.match(/(\d+)\s*mesi/i)?.[1] ?? null,
-            bonus,
-            sponsorizzata: /sponsori|pubblicit/i.test($c.attr('class') || ''),
-            urlOfferta: fullUrl,
-            logoFornitore: logoUrl,
-            fonte: sourceUrl,
-            scrapedAt: new Date().toISOString(),
-        });
-    });
-
-    return offers;
+    return r;
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
@@ -164,65 +85,134 @@ const {
     proxyConfig: proxyConfigInput,
 } = input;
 
-let proxyConfiguration;
-if (proxyConfigInput?.useApifyProxy !== false) {
-    proxyConfiguration = await Actor.createProxyConfiguration(
-        proxyConfigInput ?? { useApifyProxy: true }
-    );
-}
+// RESIDENTIAL proxy is required to bypass Cloudflare
+const proxyConfiguration = await Actor.createProxyConfiguration(
+    proxyConfigInput ?? {
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+    }
+);
 
 const seedRequests = [];
 for (const cat of categories) {
     const def = CATEGORY_URLS[cat];
     if (!def) continue;
     for (const url of def.urls) {
-        seedRequests.push({
-            url,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-                'Accept-Language': 'it-IT,it;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-            },
-            userData: { categoria: cat },
-        });
+        seedRequests.push({ url, userData: { categoria: cat } });
     }
 }
 
-log.info(`Scraping SOStariffe.it — ${seedRequests.length} pages: [${categories.join(', ')}]`);
+log.info(`Scraping ${seedRequests.length} pages: [${categories.join(', ')}]`);
 
 const dataset    = await Dataset.open();
 const seenGlobal = new Set();
 let savedCount   = 0;
 const limit      = maxItems > 0 ? maxItems * categories.length : Infinity;
 
-const crawler = new CheerioCrawler({
+const crawler = new PlaywrightCrawler({
     proxyConfiguration,
-    maxConcurrency: 3,
-    requestHandlerTimeoutSecs: 45,
-    useSessionPool: false,
+    maxConcurrency: 2,
+    requestHandlerTimeoutSecs: 90,
 
-    async requestHandler({ $, request }) {
+    // KEY: empty blockedStatusCodes so Crawlee doesn't throw on Cloudflare 403
+    // The browser will handle the challenge and load the page normally
+    sessionPoolOptions: {
+        blockedStatusCodes: [],
+    },
+
+    launchContext: {
+        launchOptions: {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        },
+    },
+
+    async requestHandler({ page, request }) {
         const { categoria } = request.userData;
-        const bodyLen = $('body').html()?.length ?? 0;
-        log.info(`[${categoria}] ${request.url} | body: ${bodyLen} chars`);
+
+        // Wait for Cloudflare challenge to complete (if any)
+        await page.waitForTimeout(5000);
+
+        const bodyLen = await page.evaluate(() => document.body?.innerHTML?.length ?? 0);
+        const title   = await page.title();
+        log.info(`[${categoria}] "${title}" | body: ${bodyLen} chars`);
 
         if (bodyLen < 1000) {
-            log.warning(`[${categoria}] Body too small (${bodyLen}) — may be blocked`);
+            log.warning(`[${categoria}] Body too small — still blocked`);
             return;
         }
 
-        const offers = extractOffers($, request.url, categoria);
-        log.info(`[${categoria}] → ${offers.length} offers found`);
+        // Wait for React to render offer cards
+        try {
+            await page.waitForSelector('img[title^="Logo di "]', { timeout: 20000 });
+            log.info(`[${categoria}] ✅ Offers rendered`);
+        } catch {
+            await page.evaluate(() => window.scrollTo(0, 600));
+            await page.waitForTimeout(3000);
+        }
 
-        for (const offer of offers) {
+        const count = await page.locator('img[title^="Logo di "]').count();
+        log.info(`[${categoria}] img[title^="Logo di "] count: ${count}`);
+
+        if (count === 0) {
+            const txt = await page.evaluate(() => document.body?.innerText?.slice(0, 500) ?? '');
+            log.warning(`[${categoria}] No offers. Body:\n${txt}`);
+            return;
+        }
+
+        // Extract from DOM
+        const rawOffers = await page.evaluate(() => {
+            const offers = [], seen = new Set();
+            document.querySelectorAll('img[title^="Logo di "]').forEach(logoEl => {
+                const fornitore = (logoEl.getAttribute('title') || '').replace(/^Logo di\s+/i, '').trim();
+                if (!fornitore || seen.has(fornitore)) return;
+                let card = logoEl.parentElement;
+                for (let i = 0; i < 8; i++) {
+                    if ((card?.textContent || '').includes('al mese') ||
+                        (card?.textContent || '').includes('Nome offerta')) break;
+                    card = card?.parentElement;
+                }
+                if (!card) return;
+                let urlOfferta = null;
+                card.querySelectorAll('a[href]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    if (/scopri|attiva/i.test(a.textContent) && href && href !== '#' && !href.includes('funzionamento'))
+                        urlOfferta = href.startsWith('http') ? href : 'https://tariffe.segugio.it' + href;
+                });
+                const lines = (card.textContent || '').split(/\n/).map(l => l.trim()).filter(Boolean);
+                seen.add(fornitore);
+                offers.push({ fornitore, logoUrl: logoEl.getAttribute('src'), urlOfferta, lines });
+            });
+            return offers;
+        });
+
+        log.info(`[${categoria}] ${rawOffers.length} raw offers`);
+        if (rawOffers[0]) {
+            log.info(`  first: "${rawOffers[0].fornitore}" | lines: ${JSON.stringify(rawOffers[0].lines.slice(0, 10))}`);
+        }
+
+        for (const raw of rawOffers) {
             if (savedCount >= limit) break;
-            if (!includeSponsored && offer.sponsorizzata) continue;
-            const key = `${offer.fornitore}||${offer.nomeOfferta}||${categoria}`;
+            const p = parseCardLines(raw.lines);
+            if (!p.prezzoMensileEur && !p.prezzoCommodity) continue;
+            if (!includeSponsored && p.sponsorizzata) continue;
+            const key = `${raw.fornitore}||${p.nomeOfferta}||${categoria}`;
             if (seenGlobal.has(key)) continue;
             seenGlobal.add(key);
-            await dataset.pushData(offer);
+
+            await dataset.pushData({
+                categoria, fornitore: raw.fornitore,
+                nomeOfferta: p.nomeOfferta, prezzoMensile: p.prezzoMensile,
+                prezzoMensileEur: p.prezzoMensileEur, prezzoCommodity: p.prezzoCommodity,
+                unitaCommodity: p.unitaCommodity, quotaFissa: p.quotaFissa,
+                quotaFissaEur: p.quotaFissaEur, tipologiaPrezzo: p.tipologiaPrezzo,
+                durataContratto: p.tipologiaPrezzo?.match(/(\d+)\s*mesi/i)?.[1] ?? null,
+                bonus: p.bonus, esclusiva: p.esclusiva, sponsorizzata: p.sponsorizzata,
+                urlOfferta: raw.urlOfferta, logoFornitore: raw.logoUrl,
+                fonte: request.url, scrapedAt: new Date().toISOString(),
+            });
             savedCount++;
-            log.info(`  ✅ [${savedCount}] ${offer.fornitore} — ${offer.nomeOfferta} — €${offer.prezzoMensileEur}/mese`);
+            log.info(`  ✅ [${savedCount}] ${raw.fornitore} — ${p.nomeOfferta} — €${p.prezzoMensileEur}/mese`);
         }
     },
 
